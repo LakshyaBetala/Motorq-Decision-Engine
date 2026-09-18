@@ -20,6 +20,8 @@ class LabeledFrame:
     """One row per vehicle-day with raw signal values and the label for `spec`.
 
     Columns: vehicle_id, date, oem, model_year, y, <signal columns...>.
+    The grid is complete (every vehicle, every day, sorted by vehicle then date). Rows whose
+    label is unknowable carry y = -1 and must be dropped *after* feature engineering.
     Feature engineering (rolling windows, deltas) is the harness's job, not the source's,
     so that the same engineering applies identically to synthetic and Snowflake data.
     """

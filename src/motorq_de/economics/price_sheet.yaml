@@ -1,0 +1,86 @@
+# Unit prices for the run-cost model. Every entry has a source or is marked placeholder.
+# as_of dates are when the figure was checked. Replace with Motorq's contracted rates.
+as_of: "2026-09-19"
+currency: USD
+
+snowflake:
+  # Standard storage, AWS US East, compressed on-disk. Snowflake compresses ~3:1 typical.
+  # source: https://redresscompliance.com/snowflake-pricing-guide-2026.html
+  storage_per_tb_month: 23.0
+  compression_ratio: 3.0
+  # Enterprise edition list credit price, AWS US. Standard is $2.00.
+  # source: https://mammoth.io/blog/snowflake-pricing/
+  credit_usd: 3.0
+  # Snowpipe volume-based billing introduced Dec 2025: 0.0037 credits per GB ingested.
+  # source: https://www.revefi.com/blog/snowflake-pricing-guide
+  snowpipe_credits_per_gb: 0.0037
+  # Snowpipe Streaming is throughput-billed; Motorq lands data this way into managed Iceberg.
+  # Public per-GB figure not available; modeled at the Snowpipe rate. placeholder.
+  snowpipe_streaming_credits_per_gb: 0.0037
+  snowpipe_streaming_placeholder: true
+  # Warehouse compute for the daily feature/scoring job: Small warehouse = 2 credits/hr.
+  # Throughput assumption for a columnar aggregation job: 20M vehicle-day-signal cells/min. modeled.
+  feature_job_credits_per_hour: 2.0
+  feature_job_cells_per_minute: 20000000
+  feature_job_placeholder: true
+
+kafka:
+  # Amazon MSK Serverless: $0.10/GB data in, $0.10/GB data out (marginal per-GB, no broker share).
+  # source: https://www.automq.com/blog/aws-msk-pricing-provisioned-serverless-express
+  per_gb_in: 0.10
+  per_gb_out: 0.10
+  retention_days: 7
+  storage_per_gb_month: 0.10
+
+oem_data:
+  # Motorq's OEM contracts are private. Public proxies bracket the range:
+  #   Smartcar Build: from $1.99 / vehicle / application / month, signals tiered by plan
+  #     source: https://smartcar.com/pricing
+  #   Ford Pro E-Telematics: $27 / vehicle / month (full package, OEM direct)
+  #     source: https://www.teslarati.com/ford-pro-e-telematcis-subscription-commercial-electric-vehicles/
+  # Modeled as base connectivity plus per-package add-ons. placeholder.
+  placeholder: true
+  base_per_vehicle_month: 1.99
+  package_add_on_per_vehicle_month:
+    location_trips: 0.75
+    health: 1.00
+    driver_behavior: 0.50
+    fuel_energy: 0.50
+    context: 0.00
+    derived: 0.00      # vendor / dealer-system signals are not OEM-priced here
+  # Pull-based OEM/aggregator APIs bill per successful request (Smartcar: "successful API
+  # requests count towards monthly usage"). One request returns a package snapshot, so calls
+  # scale with the HIGHEST polling cadence the signal set needs, not with signal count.
+  # Push/streaming OEM feeds do not incur this; set to 0 for those contracts. placeholder.
+  billing_model: pull
+  api_call_usd_per_1k: 0.02
+  # Packages Motorq already buys for shipped products. A capability only incurs OEM cost for
+  # packages not in this list; fully-attributed cost is reported alongside marginal cost.
+  already_purchased_packages: [location_trips, health, driver_behavior, fuel_energy, context, derived]
+
+telemetry:
+  # Message sizes and cadences. A normalised signal record (vin, ts, signal_id, value) ~64 B.
+  # Realtime signals: 1 sample/min over ~3 driving hours/day. modeled.
+  bytes_per_record: 64
+  samples_per_day_by_frequency: {realtime: 180, daily: 1, weekly: 0.142857}
+  raw_retention_months: 13
+  placeholder: true
+
+inference:
+  # Tree-model scoring cost is dominated by compute time; ~$0.05 per million predictions
+  # on a small warehouse. modeled.
+  usd_per_million_predictions: 0.05
+  placeholder: true
+
+engineering:
+  # Loaded engineering cost. placeholder (industry-typical).
+  usd_per_hour: 150.0
+  build_hours_by_pattern: {batch_daily: 240, batch_hourly: 320, streaming: 480}
+  amortization_months: 24
+  placeholder: true
+
+operations:
+  # Cost of acting on an alert (inspection / technician check). Shop labor $100-150/hr,
+  # ~30 min check. modeled from public shop-rate ranges.
+  inspection_cost_per_alert: {low: 40.0, base: 75.0, high: 120.0}
+  placeholder: true

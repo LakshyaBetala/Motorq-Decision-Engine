@@ -116,7 +116,7 @@ def leakage_check(source: DataSource, spec: ProblemSpec, signals: list[str]) -> 
                           produced before, not because of, the event.
     """
     lf = source.training_frame(spec, signals)
-    df = lf.frame
+    df = lf.frame[lf.frame["y"] >= 0].reset_index(drop=True)
     y = df["y"].to_numpy()
     pos = y == 1
     base_rate = float(pos.mean())
@@ -238,3 +238,30 @@ def usable_signals(
         else:
             keep.append(sid)
     return {"usable": keep, "dropped": dropped, "n_in": len(all_signals), "n_usable": len(keep)}
+
+
+def event_rate(source: DataSource, spec: ProblemSpec) -> dict[str, Any]:
+    """Measured target-event rate per vehicle-year for the decision population, with a
+    Poisson 95% CI. This replaces a human guess with a number the data knows."""
+    veh = source.vehicles()
+    if spec.powertrain_scope != "any":
+        veh = veh[veh["powertrain"] == spec.powertrain_scope]
+    ids = set(veh["vehicle_id"])
+    ev = source.events()
+    ev = ev[(ev["event_type"] == spec.target_event) & ev["vehicle_id"].isin(ids)]
+    dr = source.date_range()
+    veh_years = len(veh) * ((dr.end - dr.start).days + 1) / 365.0
+    n = int(len(ev))
+    rate = n / veh_years if veh_years > 0 else float("nan")
+    half = 1.96 * np.sqrt(max(n, 1)) / veh_years if veh_years > 0 else float("nan")
+    return {
+        "target_event": spec.target_event,
+        "population_powertrain": spec.powertrain_scope,
+        "n_vehicles": int(len(veh)),
+        "vehicle_years": round(float(veh_years), 3),
+        "n_events": n,
+        "rate_per_vehicle_year": round(float(rate), 6),
+        "rate_ci_lo": round(float(max(0.0, rate - half)), 6),
+        "rate_ci_hi": round(float(rate + half), 6),
+        "events_per_vehicle_per_horizon": round(float(rate * spec.horizon_days / 365.0), 6),
+    }

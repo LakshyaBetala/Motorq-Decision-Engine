@@ -40,9 +40,18 @@ class Range(Frozen):
 
 class ValueAssumptions(Frozen):
     """Human-supplied business inputs. The engine propagates their uncertainty;
-    it never invents them."""
+    it never invents them. The target event *rate* is NOT here: the harness measures it
+    from the data. Humans supply what data cannot know:
 
-    events_per_vehicle_year: Range
+    value_bearing_fraction   share of target events that would have caused the costly
+                             outcome (e.g. a brake service that would have been an unplanned
+                             roadside failure rather than a scheduled visit)
+    preventable_fraction     given a correct early warning, share of that cost avoided
+    usd_per_avoided_event    cost of one such outcome
+    fleet_size               vehicles the capability would run on
+    """
+
+    value_bearing_fraction: Range
     preventable_fraction: Range
     usd_per_avoided_event: Range
     fleet_size: Range
@@ -62,11 +71,19 @@ class ProblemSpec(Frozen):
     target_event: TargetEvent
     horizon_days: int = Field(7, ge=1, le=90)
     decision_unit: Literal["vehicle_day"] = "vehicle_day"
+    # the decision population; "auto" scopes EV-only targets to EVs
+    population_powertrain: Literal["auto", "any", "ev", "ice"] = "auto"
     delivery_mode: DeliveryMode = "batch_daily"
     consumer: Consumer = "fuse_action_hub"
     value: ValueAssumptions
     constraints: Constraints = Constraints()
     seed: int = 42
+
+    @property
+    def powertrain_scope(self) -> str:
+        if self.population_powertrain != "auto":
+            return self.population_powertrain
+        return "ev" if self.target_event == "battery_degradation_event" else "any"
 
 
 # --------------------------------------------------------------------------- data

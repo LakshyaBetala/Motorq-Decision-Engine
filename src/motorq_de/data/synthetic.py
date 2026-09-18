@@ -16,7 +16,7 @@ from motorq_de.schemas import CoverageStat, DateWindow, ProblemSpec, QualityStat
 from motorq_de.world import registry as reg
 from motorq_de.world.config import load_coverage
 
-META_COLS = ("vehicle_id", "date", "oem", "model_year")
+META_COLS = ("vehicle_id", "date", "oem", "model_year", "active")
 DECLARED_GAP_DAYS = {"realtime": 1.0, "daily": 1.0, "weekly": 7.0}
 
 
@@ -103,9 +103,12 @@ class SyntheticSource:
             ]
         present = df[df[signal_id].notna()]
         nonnull = float(len(present) / max(len(df), 1))
-        if len(present) > 1:
+        # gap statistics on a fixed subsample of vehicles (deterministic, cheap at scale)
+        sample_ids = self._vehicles["vehicle_id"].iloc[:: max(1, len(self._vehicles) // 400)]
+        sub = present[present["vehicle_id"].isin(set(sample_ids))]
+        if len(sub) > 1:
             gaps = (
-                present.sort_values(["vehicle_id", "date"])
+                sub.sort_values(["vehicle_id", "date"])
                 .groupby("vehicle_id")["date"]
                 .diff()
                 .dt.days.dropna()
@@ -130,6 +133,11 @@ class SyntheticSource:
     def training_frame(self, spec: ProblemSpec, signals: list[str] | None = None) -> LabeledFrame:
         sig_cols = signals or reg.signal_ids()
         df = self.read_signals(sig_cols)
+        if spec.powertrain_scope != "any":
+            keep = self._vehicles.loc[
+                self._vehicles["powertrain"] == spec.powertrain_scope, "vehicle_id"
+            ]
+            df = df[df["vehicle_id"].isin(set(keep))]
         ev = self._events[self._events["event_type"] == spec.target_event][["vehicle_id", "date"]]
         ev = ev.rename(columns={"date": "next_event"}).sort_values("next_event")
         df = df.sort_values("date")
@@ -145,17 +153,19 @@ class SyntheticSource:
         days_to = (merged["next_event"] - merged["date"]).dt.days
         y = ((days_to > 0) & (days_to <= spec.horizon_days)).astype(np.int8).to_numpy()
         df["y"] = y
-        # rows whose label window runs past the end of data are unknowable: drop them
-        last = df["date"].max() - pd.Timedelta(days=spec.horizon_days)
-        df = df[df["date"] <= last]
-        # a stolen/blacked-out vehicle-day has no signals at all: drop
+        # rows whose label window runs past the end of data are unknowable; a stolen /
+        # blacked-out vehicle-day has no signals at all. Both are kept in the grid (rolling
+        # features need the complete grid) but marked y = -1 for the harness to drop.
         present = [c for c in sig_cols if c in df.columns]
-        df = df[df[present].notna().any(axis=1)]
-        df = df.sort_values(["date", "vehicle_id"]).reset_index(drop=True)
+        last = df["date"].max() - pd.Timedelta(days=spec.horizon_days)
+        unknowable = (df["date"] > last) | ~df["active"].astype(bool)
+        df.loc[unknowable, "y"] = -1
+        df = df.sort_values(["vehicle_id", "date"]).reset_index(drop=True)
+        known = df["y"] >= 0
         return LabeledFrame(
             frame=df,
             signal_columns=tuple(present),
-            positive_rate=float(df["y"].mean()),
+            positive_rate=float(df.loc[known, "y"].mean()),
             n_vehicles=int(df["vehicle_id"].nunique()),
             n_days=int(df["date"].nunique()),
         )

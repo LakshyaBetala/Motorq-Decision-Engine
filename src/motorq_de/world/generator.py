@@ -42,6 +42,27 @@ def _sigmoid(x: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-x))
 
 
+# decoy_id -> f(observed_driver_values, rng, n). Each is a noisy transform of its driver.
+DECOY_FN = {
+    "brake_pad_wear_rear_pct": lambda d, rng, n: np.clip(d * 0.85 + rng.normal(0, 9, n), 0, 100),
+    "brake_wear_est_rear_pct": lambda d, rng, n: np.clip(d + rng.normal(0, 12, n), 0, 100),
+    "pad_thickness_proxy_mm": lambda d, rng, n: np.clip(12 - d / 10 + rng.normal(0, 2.5, n), 0, 14),
+    "mileage_band": lambda d, rng, n: np.floor(d / 25.0) + rng.integers(-1, 2, n),
+    "aggressive_driving_index": lambda d, rng, n: np.clip(d * 10 + rng.normal(0, 25, n), 0, None),
+    "driver_score": lambda d, rng, n: np.clip(90 - 4 * d + rng.normal(0, 8, n), 0, 100),
+    "brake_dtc_history_30d": lambda d, rng, n: d + rng.poisson(0.3, n),
+    "overnight_risk_score": lambda d, rng, n: np.clip(d * 100 + rng.normal(0, 25, n), 0, 100),
+    "parking_variability_score": lambda d, rng, n: np.clip(d * 30 + rng.normal(0, 20, n), 0, None),
+    "soc_stress_index": lambda d, rng, n: np.clip((100 - d) + rng.normal(0, 25, n), 0, None),
+    "fast_charge_flag_30d": lambda d, rng, n: (d > 0.15).astype(float),
+    "thermal_stress_index": lambda d, rng, n: np.clip(d - 20 + rng.normal(0, 8, n), 0, None),
+    "battery_range_mi": lambda d, rng, n: np.clip(400 - d * 0.6 + rng.normal(0, 15, n), 50, None),
+}
+
+if set(DECOY_FN) != set(reg.decoys()):  # every registry decoy must have a generator
+    raise RuntimeError(f"DECOY_FN/registry mismatch: {set(DECOY_FN) ^ set(reg.decoys())}")
+
+
 @dataclass
 class Vehicles:
     n: int
@@ -420,7 +441,7 @@ class WorldGenerator:
                 "brake_pad_wear_pct": np.clip(
                     (brake_wear + veh.wear_sensor_bias) * 100 + rng.normal(0, 3, n), 0, 100
                 ),
-                "brake_pad_wear_rear_pct": np.clip(brake_wear * 85 + rng.normal(0, 9, n), 0, 100),
+                "brake_pad_wear_rear_pct": nan,
                 "brake_fluid_level_low": (rng.random(n) < 0.005 + 0.02 * (brake_wear > 0.9)).astype(
                     float
                 ),
@@ -494,27 +515,17 @@ class WorldGenerator:
                 "altitude_mean_m": rng.normal(300, 50, n),
                 "day_of_week": np.full(n, float(dow)),
                 "is_holiday": np.full(n, float(today.month == 12 and today.day == 25)),
-                # decoys: noisy copies of drivers (correlated, no incremental information)
-                "brake_wear_est_rear_pct": np.clip(brake_wear * 100 + rng.normal(0, 12, n), 0, 100),
-                "pad_thickness_proxy_mm": np.clip(
-                    12 - brake_wear * 10 + rng.normal(0, 2.5, n), 0, 14
-                ),
-                "mileage_band": np.floor(miles / 25.0) + rng.integers(-1, 2, n),
-                "aggressive_driving_index": np.clip(
-                    harsh_brake * 10 + rng.normal(0, 25, n), 0, None
-                ),
-                "brake_dtc_history_30d": (dtc_brake + rng.poisson(0.3, n)).astype(float),
-                "overnight_risk_score": np.clip(night_park * 100 + rng.normal(0, 25, n), 0, 100),
-                "parking_variability_score": np.clip(
-                    dwell_ent * 30 + rng.normal(0, 20, n), 0, None
-                ),
-                "soc_stress_index": np.where(
-                    ev, np.clip((100 - soc_min) + rng.normal(0, 25, n), 0, None), nan
-                ),
-                "fast_charge_flag_30d": np.where(ev, (dcfc_share_30d > 0.15).astype(float), nan),
-                "thermal_stress_index": np.where(
-                    ev, np.clip(batt_temp - 20 + rng.normal(0, 8, n), 0, None), nan
-                ),
+                # decoys are computed after coverage masking from the OBSERVED driver (see below)
+                "brake_wear_est_rear_pct": nan,
+                "pad_thickness_proxy_mm": nan,
+                "mileage_band": nan,
+                "aggressive_driving_index": nan,
+                "brake_dtc_history_30d": nan,
+                "overnight_risk_score": nan,
+                "parking_variability_score": nan,
+                "soc_stress_index": nan,
+                "fast_charge_flag_30d": nan,
+                "thermal_stress_index": nan,
                 "infotainment_reboots": rng.poisson(0.1, n).astype(float),
                 "bluetooth_pairings": rng.poisson(0.3, n).astype(float),
                 "wiper_activations": rng.poisson(3, n).astype(float),
@@ -533,6 +544,13 @@ class WorldGenerator:
                 w = weekly[sid]
                 keep &= ~w | (weekly_dow == dow)
                 row[sid] = np.where(keep, vals, np.nan).astype(np.float32)
+            # decoys: noisy functions of the OBSERVED driver, NaN wherever the driver is NaN, so
+            # they are correlated with the target but carry no information the driver lacks
+            for sid, fn in DECOY_FN.items():
+                drv = row[reg.BY_ID[sid].decoy_of]
+                vals = fn(drv.astype(np.float64), rng, n).astype(np.float32)
+                keep = np.isfinite(drv) & (rng.random(n) >= miss_rate[sid]) & emits[sid]
+                row[sid] = np.where(keep, vals, np.nan).astype(np.float32)
             # theft blackout: everything dark except a few GPS fixes while stolen (if tracked)
             stolen = ~active
             if stolen.any():
@@ -546,6 +564,7 @@ class WorldGenerator:
             chunk.setdefault("date", []).append(np.full(n, np.datetime64(today, "D")))
             chunk.setdefault("oem", []).append(veh.oem)
             chunk.setdefault("model_year", []).append(veh.model_year.astype(np.int16))
+            chunk.setdefault("active", []).append(active.copy())
             for sid in reg.signal_ids():
                 chunk.setdefault(sid, []).append(row[sid])
 

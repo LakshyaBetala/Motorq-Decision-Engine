@@ -1,7 +1,7 @@
 # Synthetic-world parameters. Every value carries a source. Values marked
 # `modeled: true` are constructs chosen to make a target learnable in a
 # synthetic fleet and are NOT claims about the real world; the brief says so.
-generator_version: "0.1.0"
+generator_version: "0.2.0"
 
 population:
   n_vehicles: 5000

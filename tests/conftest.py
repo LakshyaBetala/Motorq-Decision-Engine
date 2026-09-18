@@ -39,7 +39,7 @@ def brake_spec() -> ProblemSpec:
         target_event="brake_service_event",
         horizon_days=7,
         value=ValueAssumptions(
-            events_per_vehicle_year=R(0.6, 1.0, 1.5),
+            value_bearing_fraction=R(0.05, 0.1, 0.2),
             preventable_fraction=R(0.3, 0.4, 0.5),
             usd_per_avoided_event=R(1500, 3500, 6500),
             fleet_size=R(5000, 10000, 20000),
@@ -55,7 +55,7 @@ def theft_spec() -> ProblemSpec:
         target_event="theft_event",
         horizon_days=30,
         value=ValueAssumptions(
-            events_per_vehicle_year=R(0.002, 0.0025, 0.004),
+            value_bearing_fraction=R(0.6, 0.8, 1.0),
             preventable_fraction=R(0.1, 0.2, 0.3),
             usd_per_avoided_event=R(8000, 15000, 30000),
             fleet_size=R(5000, 10000, 20000),
@@ -70,7 +70,7 @@ def battery_spec() -> ProblemSpec:
         target_event="battery_degradation_event",
         horizon_days=14,
         value=ValueAssumptions(
-            events_per_vehicle_year=R(0.1, 0.25, 0.4),
+            value_bearing_fraction=R(0.3, 0.5, 0.8),
             preventable_fraction=R(0.2, 0.3, 0.5),
             usd_per_avoided_event=R(2000, 5000, 12000),
             fleet_size=R(500, 1000, 3000),
