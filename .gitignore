@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+data/synthetic/
+*.sqlite
+.env
+node_modules/
+web/.next/
+dist/

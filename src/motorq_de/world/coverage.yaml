@@ -1,0 +1,105 @@
+# OEM coverage matrix. Archetypes are anonymised but modeled on publicly documented
+# sensor availability (brake-pad wear sensors are standard on German premium brands and
+# available on GM/Ford/Stellantis trucks and vans; generally not exposed by Toyota,
+# Hyundai/Kia, Nissan; Tesla has no pad-wear sensor and no oil). Motorq states native
+# connectivity covers "most model years from 2022 onward".
+# sources: https://www.motorq.com/oem-connectivity ;
+#          https://www.tomorrowstechnician.com/vw-audi-bmw-mercedes-brake-pad-wear-sensors-diagnostics/
+# Everything here is an assumption to be replaced by Motorq's real coverage table.
+defaults:
+  connectivity_from_model_year: 2022
+  missing_rate: 0.03
+  realtime_missing_rate: 0.05
+
+oems:
+  oem_a:   # GM-like
+    fleet_weight: 0.20
+    ev_share: 0.10
+    connectivity_from_model_year: 2020
+    signals:
+      brake_pad_wear_pct: {emits: true, from_model_year: 2020}
+      oil_life_pct: {emits: true}
+  oem_b:   # Ford-like
+    fleet_weight: 0.22
+    ev_share: 0.08
+    connectivity_from_model_year: 2021
+    signals:
+      brake_pad_wear_pct: {emits: true, from_model_year: 2021, missing_rate: 0.08}
+      oil_life_pct: {emits: true}
+  oem_c:   # Toyota-like
+    fleet_weight: 0.12
+    ev_share: 0.03
+    signals:
+      brake_pad_wear_pct: {emits: false}
+      brake_pad_wear_rear_pct: {emits: false}
+      oil_life_pct: {emits: false}
+      air_filter_life_pct: {emits: false}
+  oem_d:   # Stellantis-like
+    fleet_weight: 0.14
+    ev_share: 0.04
+    signals:
+      brake_pad_wear_pct: {emits: true, from_model_year: 2022}
+      oil_life_pct: {emits: true}
+  oem_e:   # Hyundai/Kia-like
+    fleet_weight: 0.07
+    ev_share: 0.20
+    signals:
+      brake_pad_wear_pct: {emits: false}
+      brake_pad_wear_rear_pct: {emits: false}
+      odometer_mi: {emits: true, frequency: weekly}
+      odometer_delta_mi: {emits: true, frequency: weekly}
+  oem_f:   # BMW-like
+    fleet_weight: 0.04
+    ev_share: 0.15
+    connectivity_from_model_year: 2019
+    signals:
+      brake_pad_wear_pct: {emits: true, from_model_year: 2019, missing_rate: 0.01}
+  oem_g:   # Nissan-like
+    fleet_weight: 0.05
+    ev_share: 0.10
+    signals:
+      brake_pad_wear_pct: {emits: false}
+      brake_pad_wear_rear_pct: {emits: false}
+      dtc_brake_family: {emits: true, missing_rate: 0.15}
+  oem_h:   # Tesla-like
+    fleet_weight: 0.08
+    ev_share: 1.00
+    connectivity_from_model_year: 2019
+    signals:
+      brake_pad_wear_pct: {emits: false}
+      brake_pad_wear_rear_pct: {emits: false}
+      oil_life_pct: {emits: false}
+      engine_hours: {emits: false}
+      engine_hours_delta: {emits: false}
+      coolant_temp_max_c: {emits: false}
+      air_filter_life_pct: {emits: false}
+      dtc_emissions_family: {emits: false}
+  oem_i:   # Mercedes-like
+    fleet_weight: 0.04
+    ev_share: 0.12
+    connectivity_from_model_year: 2019
+    signals:
+      brake_pad_wear_pct: {emits: true, from_model_year: 2019, missing_rate: 0.01}
+  oem_j:   # Volvo-like
+    fleet_weight: 0.04
+    ev_share: 0.25
+    connectivity_from_model_year: 2021
+    signals:
+      brake_pad_wear_pct: {emits: true, from_model_year: 2021, missing_rate: 0.10}
+
+# Signals that no OEM emits natively; they arrive from dealer/vendor systems and are
+# available for every OEM (this is what makes decoys and leakage traps realistic).
+vendor_signals:
+  - brake_wear_est_rear_pct
+  - pad_thickness_proxy_mm
+  - mileage_band
+  - aggressive_driving_index
+  - brake_dtc_history_30d
+  - overnight_risk_score
+  - parking_variability_score
+  - soc_stress_index
+  - fast_charge_flag_30d
+  - thermal_stress_index
+  - service_appointment_scheduled
+  - service_interval_remaining_days
+  - region_theft_index

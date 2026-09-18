@@ -1,0 +1,60 @@
+"""SyntheticSource must label correctly and satisfy the DataSource protocol."""
+
+from __future__ import annotations
+
+import pandas as pd
+
+from motorq_de.data.snowflake import SnowflakeSource
+from motorq_de.data.source import DataSource
+from motorq_de.schemas import ProblemSpec
+
+
+def test_satisfies_protocol(source):
+    assert isinstance(source, DataSource)
+
+
+def test_labels_match_events_exactly(source, brake_spec: ProblemSpec):
+    lf = source.training_frame(brake_spec, ["odometer_delta_mi"])
+    df = lf.frame
+    ev = source.events()
+    ev = ev[ev.event_type == brake_spec.target_event]
+    # pick a handful of events and check every day in (t-h, t) is labelled positive
+    for _, row in ev.head(15).iterrows():
+        window = df[
+            (df.vehicle_id == row.vehicle_id)
+            & (df.date < row.date)
+            & (df.date >= row.date - pd.Timedelta(days=brake_spec.horizon_days))
+        ]
+        assert (window.y == 1).all(), (row.vehicle_id, row.date)
+        # and the event day itself is not labelled by its own event (exact match excluded)
+        same = df[(df.vehicle_id == row.vehicle_id) & (df.date == row.date)]
+        if len(same):
+            nxt = ev[
+                (ev.vehicle_id == row.vehicle_id)
+                & (ev.date > row.date)
+                & (ev.date <= row.date + pd.Timedelta(days=brake_spec.horizon_days))
+            ]
+            assert int(same.y.iloc[0]) == int(len(nxt) > 0)
+
+
+def test_last_horizon_days_dropped(source, brake_spec):
+    lf = source.training_frame(brake_spec, ["odometer_delta_mi"])
+    full = source.date_range()
+    assert lf.frame.date.max().date() <= full.end - pd.Timedelta(days=brake_spec.horizon_days)
+
+
+def test_signal_metadata_and_catalog(source):
+    sigs = source.list_signals()
+    assert len(sigs) >= 85
+    m = source.signal_metadata("brake_pad_wear_pct")
+    assert m.category == "health" and m.declared_frequency == "daily"
+
+
+def test_snowflake_stub_documents_sql():
+    s = SnowflakeSource({}, "MOTORQ", "NORMALIZED")
+    try:
+        s.list_signals()
+    except NotImplementedError as e:
+        assert "SIGNAL_CATALOG" in str(e)
+    else:
+        raise AssertionError("stub should raise")

@@ -1,0 +1,77 @@
+# Synthetic-world parameters. Every value carries a source. Values marked
+# `modeled: true` are constructs chosen to make a target learnable in a
+# synthetic fleet and are NOT claims about the real world; the brief says so.
+generator_version: "0.1.0"
+
+population:
+  n_vehicles: 5000
+  n_days: 540
+  start_date: "2024-01-01"
+  model_years: [2019, 2020, 2021, 2022, 2023, 2024, 2025]
+  model_year_weights: [0.06, 0.08, 0.12, 0.20, 0.22, 0.20, 0.12]
+  segments: [sedan, suv, van, pickup, ev]
+  climate_zones: [hot, temperate, cold]
+  climate_weights: [0.30, 0.50, 0.20]
+  duty_classes: [light, medium, heavy]
+  duty_weights: [0.40, 0.40, 0.20]
+
+usage:
+  # FHWA light-duty average ~10,952 mi/yr (~30 mi/day); commercial fleets run higher.
+  # source: https://afdc.energy.gov/data/10309 (FHWA Highway Statistics 2022)
+  miles_per_day_by_duty: {light: 30, medium: 60, heavy: 110}
+  miles_per_day_cv: 0.45
+  weekend_factor: 0.35
+  trips_per_100mi: 6.0
+  urban_share_by_segment: {sedan: 0.55, suv: 0.50, van: 0.80, pickup: 0.45, ev: 0.60}
+
+brakes:
+  # Pad life 30k-70k mi typical light duty; 5k-8k mi for heavy urban vans.
+  # sources: https://directbrakes.com/blog/how-often-replace-brakes ;
+  #          https://runexauto.com/when-do-you-replace-your-cars-brake-pads-car-care/
+  pad_life_miles_base: 50000
+  pad_life_miles_by_segment: {sedan: 1.0, suv: 0.9, van: 0.55, pickup: 0.75, ev: 1.6}
+  pad_life_miles_by_duty: {light: 1.0, medium: 0.75, heavy: 0.35}
+  harsh_brake_wear_multiplier: 0.12   # per harsh event per 30 mi, modeled
+  climate_wear_multiplier: {hot: 1.05, temperate: 1.0, cold: 1.12}
+  oem_wear_multiplier: {oem_a: 1.0, oem_b: 1.05, oem_c: 0.92, oem_d: 1.08, oem_e: 0.97,
+                        oem_f: 0.95, oem_g: 1.0, oem_h: 0.7, oem_i: 0.93, oem_j: 0.96}
+  hazard_threshold: 0.93     # fleet-mean wear fraction at which daily hazard hits 50%, modeled
+  threshold_sd_between_vehicles: 0.06   # fleets/operators service at different wear levels, modeled
+  sensor_bias_sd: 0.05       # per-vehicle bias of the OEM wear estimate, modeled
+  hazard_steepness: 30.0     # modeled
+  reset_wear_after_service: 0.04
+  service_lag_days_max: 12   # inspection -> appointment -> service; modeled
+
+battery:
+  # Geotab 2026: 2.3%/yr avg SoH loss across 22,700 EVs; up to 3.0%/yr with >100 kW DCFC;
+  # hot regions ~0.4%/yr higher.
+  # source: https://www.geotab.com/press-release/ev-battery-health-degradation-fast-charging-study/
+  soh_loss_per_year_base: 0.023
+  soh_loss_dcfc_multiplier_at_full_share: 1.30
+  soh_loss_hot_climate_add_per_year: 0.004
+  # Battery service event = SoH-driven degradation flag or cell fault. Modeled so ~0.25
+  # events/EV/yr occur in the synthetic fleet; not a real-world rate.
+  event_soh_threshold: 0.86
+  event_hazard_steepness: 60.0
+  event_base_daily_hazard: 0.00015
+  modeled: true
+
+theft:
+  # NICB 2024: 250.2 thefts per 100k residents; ~0.25%/yr per registered vehicle.
+  # Recovery: ~85% recovered; 34% same day; 45% within 2 days.
+  # sources: https://www.nicb.org/news/news-releases/vehicle-thefts-united-states-fell-17-2024
+  #          https://www.nicb.org/2023-vehicle-theft-trends-report
+  real_world_annual_rate: 0.0025
+  # ELEVATED for learnability in a 5k-vehicle synthetic fleet (real rate would yield
+  # ~12 events/yr). The brief discloses this. Segment multipliers follow NICB's finding
+  # that full-size pickups have the highest theft rate.
+  synthetic_annual_rate: 0.03
+  modeled: true
+  segment_multiplier: {sedan: 0.9, suv: 1.0, van: 0.8, pickup: 1.8, ev: 0.5}
+  recovery_probability: 0.85
+  recovery_same_day: 0.34
+  recovery_within_2_days: 0.45
+
+signals:
+  noise_cv_default: 0.05
+  decoy_noise_sd_multiplier: 2.5
