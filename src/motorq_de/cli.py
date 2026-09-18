@@ -66,68 +66,29 @@ if __name__ == "__main__":
 run_app = typer.Typer(help="Decision runs")
 app.add_typer(run_app, name="run")
 
-EXAMPLES = {
-    "brake": {
-        "capability_name": "brake_service_7d",
-        "target_event": "brake_service_event",
-        "horizon_days": 7,
-        "value": {
-            # share of brake services that would have been unplanned downtime (value-bearing);
-            # $/event from public fleet downtime studies ($3.5k-6.5k/incident). See README sources.
-            "value_bearing_fraction": {"low": 0.05, "base": 0.10, "high": 0.20},
-            "preventable_fraction": {"low": 0.3, "base": 0.4, "high": 0.5},
-            "usd_per_avoided_event": {"low": 1500, "base": 3500, "high": 6500},
-            "fleet_size": {"low": 5000, "base": 10000, "high": 20000},
-            "source_note": "downtime $448-760/day and $3.5k-6.5k/incident (oxmaint, fleetrabbit); predictive maintenance cuts unplanned downtime 30-50%",
-        },
-    },
-    "theft": {
-        "capability_name": "theft_risk_30d",
-        "target_event": "theft_event",
-        "horizon_days": 30,
-        "value": {
-            "value_bearing_fraction": {"low": 0.6, "base": 0.8, "high": 1.0},
-            "preventable_fraction": {"low": 0.1, "base": 0.2, "high": 0.3},
-            "usd_per_avoided_event": {"low": 8000, "base": 15000, "high": 30000},
-            "fleet_size": {"low": 5000, "base": 10000, "high": 20000},
-            "source_note": "NICB 2024: 250/100k residents; ~85% recovered; loss per unrecovered/damaged vehicle is a human estimate",
-        },
-    },
-    "battery": {
-        "capability_name": "battery_service_14d",
-        "target_event": "battery_degradation_event",
-        "horizon_days": 14,
-        "value": {
-            "value_bearing_fraction": {"low": 0.3, "base": 0.5, "high": 0.8},
-            "preventable_fraction": {"low": 0.2, "base": 0.3, "high": 0.5},
-            "usd_per_avoided_event": {"low": 2000, "base": 5000, "high": 12000},
-            "fleet_size": {"low": 500, "base": 1000, "high": 3000},
-            "source_note": "Geotab 2026 degradation rates; $/event is a human estimate of an unplanned EV service",
-        },
-    },
-}
+from motorq_de.agent.service import EXAMPLE_SPECS as EXAMPLES  # noqa: E402
 
 
 @run_app.command("headless")
 def run_headless(
     example: str = typer.Option("brake", help="brake | theft | battery, or path to a spec JSON"),
-    dataset: Path | None = typer.Option(None, help="dataset dir; default latest"),
+    dataset: Path | None = typer.Option(None, help="synthetic dataset dir; default latest"),
+    snowflake: Path | None = typer.Option(
+        None, help="Snowflake adapter YAML (uses SNOWFLAKE_* env credentials)"
+    ),
     out: Path | None = typer.Option(None, help="write brief markdown here"),
 ):
     """Run the default plan with no LLM and print the cited brief."""
-    from motorq_de.agent.runner import Runner
-    from motorq_de.data.synthetic import SyntheticSource, latest_dataset
-    from motorq_de.ledger.store import Ledger
+    from motorq_de.agent.service import Service, snowflake_source
     from motorq_de.schemas import ProblemSpec
 
     if example in EXAMPLES:
         spec = ProblemSpec.model_validate(EXAMPLES[example])
     else:
         spec = ProblemSpec.model_validate_json(Path(example).read_text(encoding="utf-8"))
-    src = SyntheticSource(dataset or latest_dataset(DATA_ROOT))
-    rprint(f"[bold]dataset[/] {src.dataset_hash}  [bold]spec[/] {spec.capability_name}")
-    runner = Runner(src, Ledger(), progress=lambda m: rprint(f"  [dim]{m}[/]"))
-    res = runner.run(spec)
+    svc = Service(source=snowflake_source(snowflake) if snowflake else None, dataset=dataset)
+    rprint(f"[bold]dataset[/] {svc.source.dataset_hash}  [bold]spec[/] {spec.capability_name}")
+    res = svc.run(spec, progress=lambda m: rprint(f"  [dim]{m}[/]"))
     rprint(f"\n[bold green]{res.verdict.decision}[/]  run {res.run_id}  replans={res.replans}\n")
     if out:
         out.write_text(res.brief_md, encoding="utf-8")
@@ -164,3 +125,53 @@ def run_evidence(evidence_id: str):
         rprint("[red]not found[/]")
         raise typer.Exit(1)
     print(json.dumps(e, indent=2, default=str))
+
+
+@run_app.command("ask")
+def run_ask(
+    text: str = typer.Argument(..., help="free-text capability request"),
+    dataset: Path | None = typer.Option(None),
+    out: Path | None = typer.Option(None),
+):
+    """Parse a free-text request with the LLM, run the pipeline, add a cited narrative."""
+    from motorq_de.agent.service import Service
+
+    svc = Service(dataset=dataset)
+    if not svc.llm_available():
+        rprint(
+            "[red]LLM interface unavailable[/] - set ANTHROPIC_API_KEY (or use `mde run headless`)"
+        )
+        raise typer.Exit(2)
+    spec, notes = svc.spec_from_text(text)
+    rprint(f"[bold]spec[/] {spec.model_dump_json(indent=1)}\n[dim]{notes}[/]")
+    res = svc.run(
+        spec, request_text=text, use_llm=True, progress=lambda m: rprint(f"  [dim]{m}[/]")
+    )
+    rprint(f"\n[bold green]{res.verdict.decision}[/]  run {res.run_id}\n")
+    if out:
+        out.write_text(res.brief_md, encoding="utf-8")
+        rprint(f"[green]brief written[/] {out}")
+    else:
+        print(res.brief_md)
+
+
+@app.command("ask")
+def ask(run_id: str, question: str):
+    """Ask a question about a finished run; the answer cites evidence ids."""
+    from motorq_de.agent.service import Service
+
+    svc = Service()
+    if not svc.llm_available():
+        rprint("[red]LLM interface unavailable[/] - set ANTHROPIC_API_KEY")
+        raise typer.Exit(2)
+    text, cited = svc.ask(run_id, question)
+    print(text)
+    rprint(f"[dim]cites: {', '.join(cited) or 'none'}[/]")
+
+
+@app.command("serve")
+def serve(host: str = "127.0.0.1", port: int = 8000):
+    """Start the HTTP API."""
+    import uvicorn
+
+    uvicorn.run("motorq_de.api:app", host=host, port=port, reload=False)

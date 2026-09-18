@@ -214,3 +214,23 @@ Next.js app: run list; run page with step timeline, verdict card (gates/flags), 
 ## 16. Out of scope for this cycle
 
 Real Snowflake connection; auth on the API; multi-user; scheduled portfolio-wide COGS runs (design allows it; not built).
+
+## 17. Revisions made during implementation (2026-09-19)
+
+Each of these was forced by a result from the first runs, not by preference. The code and
+tests reflect the revised design; the sections above are kept as the original contract.
+
+| Area | Original | Revised | Why |
+|---|---|---|---|
+| Value assumptions (§3) | `events_per_vehicle_year` supplied by humans | Event rate is **measured** from the data with a Poisson CI (`quality.event_rate`); humans supply `value_bearing_fraction` instead | One fewer invented number; makes the target/value mismatch explicit |
+| Population (§3) | implicit | `ProblemSpec.population_powertrain` (`auto` scopes EV-only targets to EVs) | ICE-only signals trivially identified EVs and dominated the battery ranking |
+| Decoys (§4) | noisy copy of the latent for all OEMs | noisy function of the **observed** driver, NaN where the driver is NaN | A vendor signal built from the hidden state beat the real sensor because it had no OEM gaps |
+| Brake realism (§4) | fixed service threshold | per-vehicle service threshold and sensor bias; 0-12 day service lag | Univariate AUC of the sensor was 0.98, indistinguishable from leakage |
+| Leakage (§6) | AUC >= 0.95 dropped | Three-tier: hard signatures (availability jump, monotone-to-event, flag lift, AUC >= 0.99) dropped; AUC in [0.95, 0.99) kept and reported as *suspicious*; policy flag `suspicious_signals` | Data alone cannot distinguish a perfect sensor from a leak |
+| Ablation rule (§7) | CI lower bound > -tolerance | Accept if >= 80% of paired cluster-bootstrap replicates exceed -tolerance; report `resolution`; flag `ablation_underpowered` when half-width > tolerance/2; importance screen to top 20 before elimination | Strict CI rule was a coin flip at low power; reporting power is more honest than silently failing removals |
+| Baseline (§7) | univariate AUC of best signal | one-signal LightGBM OOF on the same population (top 3 by univariate AUC) | Univariate AUC on available rows flattered gappy sensors and failed the model gate unfairly |
+| Economics (§8) | infra + OEM packages | + per-call OEM pricing driven by the highest polling cadence; explicit marginal vs attributed views; net-value-optimal alert rate | At list prices infra is pennies; polling cadence and build effort are the levers |
+| Policy (§9) | 5 flags | 8 flags (+ `ablation_underpowered`, `suspicious_signals`, `cost_placeholders`) | Each corresponds to an honesty requirement discovered in testing |
+| Data layer (§5) | SyntheticSource; SnowflakeSource stub | `FrameSource` base shared by `SyntheticSource` and a working `SnowflakeSource` (configurable tables, inferred coverage, deterministic VIN sampling, grid completion), tested with a production-shaped fake | The seam had to be real code, not a docstring |
+| Layout (§2) | `api/` top-level | `motorq_de/api.py` inside the package; `agent/service.py` facade | `mde serve` works from any directory |
+| Dependencies | pandas unpinned | `pandas>=2.2,<3` | Snowflake connector supports pandas 2.x |

@@ -1,0 +1,10 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: light; }
+html { font-feature-settings: "cv02", "cv03", "cv04", "cv11"; }
+body { @apply bg-ink-100 text-ink-900 antialiased; }
+.card { @apply rounded-lg border border-ink-300/70 bg-white shadow-sm; }
+.mono { @apply font-mono text-[12px]; }
+.cite { @apply mono inline-block rounded bg-ink-100 px-1 py-[1px] text-ink-700 hover:bg-ink-300/60 cursor-pointer; }

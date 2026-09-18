@@ -17,6 +17,7 @@ from typing import Any
 
 from sqlalchemy import JSON, Float, ForeignKey, Integer, String, Text, create_engine, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
+from sqlalchemy.pool import StaticPool
 
 from motorq_de.hashing import canonical_json, evidence_id, hash_inputs, round_floats
 from motorq_de.schemas import Evidence, ProblemSpec, Verdict
@@ -91,6 +92,15 @@ def make_engine(url: str | None = None):
     if url.startswith("sqlite"):
         Path(url.split("///", 1)[1]).parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(url, future=True)
+    Base.metadata.create_all(engine)
+    return engine
+
+
+def memory_engine():
+    """A shared in-memory SQLite engine (one connection across threads) for tests and demos."""
+    engine = create_engine(
+        "sqlite://", future=True, connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
     Base.metadata.create_all(engine)
     return engine
 

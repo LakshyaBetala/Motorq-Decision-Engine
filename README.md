@@ -68,59 +68,67 @@ A deterministic pipeline with an optional LLM front end.
             |
             v
    +--------------------+
-   |  ProblemSpec        |  target event . horizon . decision unit . delivery mode
+   |  ProblemSpec        |  target event . horizon . population . delivery mode
    |  (validated schema) |  value assumptions as [low, base, high] . constraints
    +---------+----------+
              v
-   +--------------------+   coverage by OEM x model year . freshness . missingness
-   |  Data feasibility   |   frequency . drift . leakage traps
+   +--------------------+   measured event rate (Poisson CI) . coverage by OEM x
+   |  Data feasibility   |   model year . freshness . drift . three-tier leakage
+   |                     |   detector (dropped / confirm-availability)
    +---------+----------+
              v
-   +--------------------+   importance w/ bootstrap CIs . greedy ablation with
-   |  Experiment harness |   paired-bootstrap dAUC . temporal split . leave-one-
-   |                     |   OEM-out . baselines (majority, best single signal)
+   +--------------------+   signal-level permutation importance w/ CIs . two-stage
+   |  Experiment harness |   ablation (screen, then ordered elimination with paired
+   |                     |   cluster-bootstrap non-inferiority) . forward temporal
+   |                     |   split . leave-one-OEM-out . fair one-signal baseline
    +---------+----------+
              v
-   +--------------------+   volume model from signal set x fleet x frequency
-   |  Economics          |   price sheet (cited unit prices) -> run cost
-   |                     |   value ranges -> Monte Carlo -> P(ROI>0), tornado
+   +--------------------+   sourced price sheet x volumes -> marginal & attributed
+   |  Economics          |   run cost . PERT Monte Carlo ROI . net-value-optimal
+   |                     |   alert operating point . tornado sensitivity
    +---------+----------+
              v
-   +--------------------+   pure function of evidence: hard gates + uncertainty
-   |  Decision policy    |   flags -> BUILD-READY / PILOT / NOT-FEASIBLE
+   +--------------------+   pure function of evidence: 4 hard gates + 8 uncertainty
+   |  Decision policy    |   flags -> BUILD_READY / PILOT / NOT_FEASIBLE
    +---------+----------+
              v
-   +--------------------+   every number cites an evidence_id
-   |  Evidence brief     |   renderer refuses uncited claims
+   +--------------------+   every numeric line cites an evidence_id
+   |  Evidence brief     |   renderer fails closed on uncited claims
    +--------------------+
 ```
 
-**The LLM's role, precisely:** parse a free-text request into a `ProblemSpec`; choose which optional experiments to add when predicates fire (e.g. cross-OEM variance above threshold → per-OEM ablation); write narrative that must cite evidence IDs or be dropped; answer follow-ups ("why was GPS excluded?") from the evidence store. It never emits a number that did not come from a tool. It cannot change the verdict — it can only request more evidence.
+**What humans supply and what the engine measures.** The target-event rate is *measured* from the data (with a confidence interval), not guessed. Humans supply only what data cannot know: the share of target events that would have caused the costly outcome (`value_bearing_fraction`), the share of that cost a correct early warning avoids, the dollar cost of one such outcome, and the fleet size — each as a `[low, base, high]` range. The verdict's sensitivity to each is reported.
+
+**The LLM's role, precisely:** parse a free-text request into a `ProblemSpec` (never inventing business numbers; documented defaults are substituted and labelled as such); write a short narrative in which every sentence containing a number must cite an evidence id or is dropped; answer follow-ups ("why was GPS excluded?") using two tools that read the ledger. It never computes a number and cannot change the verdict. `mde run headless` runs the entire pipeline with no LLM at all.
 
 ---
 
 ## 5. Decision policy
 
-The verdict is computed, versioned, and unit-tested — not generated.
+The verdict is computed, versioned (`policy_version 1.0`), and unit-tested at every boundary — not generated.
 
 ```
-HARD GATES         any failure -> NOT-FEASIBLE
-  data       required signals exist AND OEM coverage of the full set >= spec threshold
-  model      lift over best baseline, CI lower bound > 0
-  economics  P(ROI > 0) >= 0.5 under supplied value ranges
-  delivery   at least one deployment pattern meets horizon/latency constraints
+HARD GATES         any failure -> NOT_FEASIBLE
+  data       fleet share covered by the whole sufficient signal set >= min_oem_coverage (0.6)
+  model      lower CI bound of (AUC - AUC of the best ONE-signal model on the same population) > 0
+  economics  P(ROI > 0) >= 0.5 under the supplied value ranges
+  delivery   at least one deployment pattern meets the horizon / latency constraints
 
-UNCERTAINTY FLAGS  any trip -> PILOT instead of BUILD-READY
-  cross-OEM AUC variance above tau
-  temporal degradation CI includes a material drop
-  ROI 90% interval spans negative
-  value assumptions not yet validated against pilot outcomes
-  required signal set includes signals with < N months of history
+UNCERTAINTY FLAGS  any trip -> PILOT instead of BUILD_READY
+  cross_oem_variance      leave-one-OEM-out AUC std > 0.03, or worst OEM > 0.05 below mean
+  temporal_degradation    forward-split AUC below CV AUC by > 0.03 (upper bound)
+  roi_spans_negative      5th-percentile ROI < 0
+  value_unvalidated       value assumptions not yet validated against pilot outcomes
+  short_history           a sufficient-set signal has < 6 months of history
+  ablation_underpowered   the bootstrap could not resolve tolerance/2 (0.0025 AUC)
+  suspicious_signals      a sufficient-set signal is unusually strong - confirm it exists
+                          before, not because of, the event
+  cost_placeholders       the run cost rests on placeholder unit prices
 
-BUILD-READY only if every gate passes with margin and no flag trips.
+BUILD_READY only if every gate passes and no flag trips.
 ```
 
-"BUILD-READY" means *the evidence supports building*. Whether to build is still a human call.
+"BUILD_READY" means *the evidence supports building*. Whether to build is still a human call.
 
 ---
 
@@ -136,84 +144,107 @@ These are tested invariants, not aspirations.
 | **Oracle validation** | On synthetic data with known structure, the harness must recover planted drivers and reject planted decoys. This is the harness's test suite. |
 | **Policy purity** | The decision policy is a pure function with tests at every gate boundary. |
 | **Replay** | Any past brief re-runs from its stored spec and dataset hash and can be diffed. |
-| **Headless** | `--no-llm` runs the default plan end to end and produces the same evidence and verdict. |
+| **Headless** | `mde run headless` runs the default plan end to end with no LLM and produces the same evidence and verdict. |
 
 ---
 
-## 7. Data: synthetic now, Snowflake next — and what each proves
+## 7. Data: the synthetic world and the Snowflake adapter
 
-The MVP runs on a synthetic world, and it is important to be exact about what that does and does not show.
+The engine ships with a synthetic world and a production adapter, and it is important to be exact about what each proves.
 
-**The synthetic world is not random columns.** Each vehicle carries hidden wear states (brakes, battery, engine, tires, fuel system) that evolve with usage, climate, and OEM-specific reliability. Observable signals are noisy, OEM-dependent *views* of those states — a coverage matrix decides which OEMs emit which signals, at what frequency, with what missingness, from which model year. Events are hazard-driven from the latent states: maintenance events from wear; theft from location and dwell patterns (so GPS genuinely earns its recovery value); utilization from trips. Ground truth is saved alongside the data and is the test oracle for the harness.
+**The synthetic world is not random columns.** Each vehicle carries hidden wear states (brake wear, battery state-of-health, theft-risk context) that evolve with usage, climate, and OEM-specific reliability. Observable signals are noisy, OEM-dependent *views* of those states — a coverage matrix modeled on public sensor availability decides which OEMs emit which signals, at what cadence, with what missingness, from which model year. Events are hazard-driven from the latents; every rate parameter is sourced (FHWA mileage, brake-pad life, NICB theft, Geotab EV degradation, fleet-downtime studies) or explicitly marked as modeled in `world/params.yaml`. Ground truth — which signals drive which target, which are decoys (noisy functions of an observed driver), which are noise, which are leakage traps — is written next to the data and is the harness's test oracle.
 
-**What synthetic proves:** the harness recovers known structure, the policy behaves at its boundaries, the pipeline is deterministic and replayable, the brief is fully cited. **What it does not prove:** anything about Motorq's actual signals. "GPS has low value for brake prediction" on synthetic data is a property of the generator, not of the fleet.
+**What synthetic proves:** the harness recovers planted structure and rejects decoys, leaks and noise; the policy behaves at its boundaries; the pipeline is byte-deterministic and replayable; the brief is fully cited. **What it does not prove:** anything about Motorq's actual signals.
 
-**The path to real value is a single seam.** All tools consume a `DataSource` protocol:
+**The adapter is real.** `SnowflakeSource` reads Motorq-shaped tables (`VEHICLES`, `SIGNALS_DAILY`, `EVENTS`, `SIGNAL_CATALOG`; names and columns are YAML configuration) and shares every line of labelling, coverage, quality and modelling code with the synthetic source through a common `FrameSource` base. It infers OEM coverage from data, samples VINs deterministically, and completes the vehicle-day grid. It is tested end-to-end with a fake query function that serves the synthetic dataset in production shape — the adapter must reproduce the synthetic source's labels and coverage exactly. See [docs/SNOWFLAKE.md](docs/SNOWFLAKE.md).
 
+```bash
+mde run headless --example brake --snowflake snowflake.yaml --out brief.md
 ```
-list_signals()                     signal_metadata(id)
-coverage_by_oem(signal)            quality(signal, window)
-training_frame(spec) -> X, y, groups=oem, time
-```
-
-`SyntheticSource` implements it fully. `SnowflakeSource` is a typed stub with the SQL shape sketched against normalized per-VIN signal tables. Pointing the harness at Motorq's Iceberg tables is an adapter, not a rewrite. Until that adapter exists, this is a demonstration of a machine, not a finding about Motorq.
 
 ---
 
 ## 8. Architecture
 
-Dependencies point strictly downward. The LLM lives only in `agent/`.
+Dependencies point strictly downward (enforced by import-linter). The LLM lives only in `agent/llm.py`.
 
 ```
-web/        Next.js - reasoning trail, evidence drill-down, brief
-api/        FastAPI - POST /runs . GET /runs/{id} . POST /runs/{id}/ask
-agent/      ProblemSpec parser . bounded state machine . LLM tool loop . Q&A
-policy/     gates + flags -> verdict (pure)          report/  cited renderer
-harness/    importance . ablation . temporal . cross-OEM . comparison
-economics/  price sheet . volume model . value ranges . Monte Carlo . sensitivity
-quality/    coverage . freshness . missingness . drift . leakage checks
-ledger/     runs . steps . tool_calls . evidence . artifacts   (Postgres)
-data/       DataSource protocol -> SyntheticSource | SnowflakeSource
-world/      latent-degradation generator . signal registry . coverage matrix
+web/                    Next.js - runs, verdict gates/flags, importance / ablation / cross-OEM /
+                        tornado charts, cited brief with evidence drill-down, Q&A
+motorq_de/api.py        FastAPI - /runs, /tickets, /runs/{id}/brief, /evidence, /ask
+motorq_de/agent/        runner (default plan + code-level replan predicates), service, llm
+motorq_de/report/       typed brief; every numeric line cites; renderer fails closed
+motorq_de/ledger/       runs . steps . evidence . messages   (Postgres or SQLite)
+motorq_de/policy/       gates + flags -> verdict (pure)
+motorq_de/economics/    price_sheet.yaml (sourced) . cost . value (PERT Monte Carlo) . deployment
+motorq_de/harness/      frames . stats (cluster bootstrap) . models . experiments
+motorq_de/quality/      coverage . quality . leakage . event_rate . usable_signals
+motorq_de/data/         DataSource protocol . FrameSource . SyntheticSource . SnowflakeSource
+motorq_de/world/        params.yaml (sourced) . coverage.yaml . registry . generator
 ```
 
-**Stack:** Python 3.12, FastAPI, SQLAlchemy, PostgreSQL (SQLite fallback for local), scikit-learn + LightGBM, Anthropic SDK for the agent layer, Next.js + Tailwind for the trail UI, pytest for the reliability contract.
+**Stack:** Python 3.12, FastAPI, SQLAlchemy (PostgreSQL via `DATABASE_URL`, SQLite fallback), pandas, scikit-learn, LightGBM, Anthropic SDK (optional), Next.js 15 + Tailwind + Recharts, pytest.
 
 ---
 
-## 9. Worked example
+## 9. Worked example — an actual run
 
-**Request:** *"Should Fuse flag vehicles likely to need brake service in the next 7 days?"*
-
-**Brief (abridged; every line cites evidence):**
+`mde run headless --example brake` on the small synthetic fixture (600 vehicles, 200 days). Abridged; every line in the real brief carries its evidence id.
 
 | Section | Finding |
 |---|---|
-| Spec | target = brake_service_event, horizon = 7d, unit = vehicle-day, delivery = batch daily |
-| Data | 7-signal sufficient set exists; full-set coverage 78% of fleet (OEM A/B/D 2022+; OEM C lacks brake-pad wear) `[ev_014, ev_019]` |
-| Model | AUC 0.86 [0.84, 0.88] vs best single-signal baseline 0.71; lift CI excludes 0 `[ev_031]` |
-| Robustness | Leave-one-OEM-out AUC range 0.79–0.88; OEM C held out drops to 0.79 — **flag** `[ev_037]`. Forward 3-month split: −0.01, not material `[ev_040]` |
-| Economics | 7-signal run cost $X/mo vs 60-signal $Y/mo (−71%) `[ev_052]`. P(ROI>0) = 0.83; 90% interval spans negative at low preventable-fraction — **flag** `[ev_058]`. Verdict is most sensitive to $/avoided-event `[ev_059]` |
-| Delivery | Batch daily on Snowflake fits horizon; streaming unnecessary `[ev_061]` |
-| **Verdict** | **PILOT** — gates pass; two uncertainty flags (OEM C generalization, value-assumption sensitivity). Recommend a pilot on OEM A/B fleets to validate the $/event assumption before committing coverage work for OEM C. |
+| Event rate | Measured 1.05 brake services / vehicle-year [0.94, 1.16]; 2.0% of vehicle-days are positive at a 7-day horizon |
+| Leakage | Two dealer-system fields caught and excluded: `service_appointment_scheduled` (flag lift 38x base rate) and `service_interval_remaining_days` (availability jump 4x, Spearman 1.0 with days-to-event). The real wear sensor (AUC 0.95 on the rows where it exists) is kept |
+| Coverage | Fleet share with the full sufficient set 0.60 — exactly at the gate; OEMs C, E, G, H lack the wear sensor |
+| Model | 13-signal sufficient set: AUC 0.877 [0.860, 0.894] vs full 90-signal set 0.872 [0.855, 0.888]; best one-signal model on the same population 0.838, so the lift CI lower bound is +0.023 (gate passes) |
+| Robustness | Leave-one-OEM-out: mean 0.83, worst OEM H at 0.62 with 70% of features missing — **flag**. Forward split degradation +0.006 (upper bound 0.041) — **flag**, wide because the fixture is small |
+| Economics | 7.2 GB/month vs 162 GB/month for the full set (−95% volume) but infra $2 vs $37 per month at list prices; the real levers are OEM polling cadence and build effort. Net-value-optimal operating point alerts the top 0.5% of vehicle-days. P(ROI > 0) = 0.32; median net value −$31k/yr under the stated value assumptions. Verdict most sensitive to `value_bearing_fraction` and `usd_per_avoided_event` |
+| **Verdict** | **NOT_FEASIBLE** as specified: the economics gate fails because only ~10% of predicted services are assumed to carry downtime value. The brief says which assumption to revisit; a redefined target ("unplanned brake failure" rather than "any brake service") is the obvious next study |
 
-**Follow-up:** *"Why is GPS excluded?"* — the engine cites the ablation step where removing trip-level GPS moved AUC by +0.002 [−0.004, 0.008], notes GPS carries high importance in the recovery-prediction spec `[ev_recovery_022]`, and states that the exclusion applies to this capability's run cost only.
+That is the tool doing its job: an honest, cited "no, and here is why" in five minutes, instead of a three-week study that arrives at "probably".
+
+**What the first runs taught the design** (all fixed and tested):
+- A noisier full-coverage signal can beat a precise sensor with OEM gaps — real, but the generator must not cheat by giving vendor signals the hidden state. Decoys are now noisy functions of the *observed* driver.
+- "Best single signal" AUC on the rows where a signal exists is not a fair baseline for a model scored on everyone; the baseline is now a one-signal *model* on the same population.
+- Asking humans for the event rate was one invented number too many; the harness measures it.
+- Small data cannot resolve 0.005 AUC in ablation. The tool now reports its resolution and flags `ablation_underpowered` instead of pretending.
+- Per-signal infra cost is pennies at list prices. Saying so plainly is more useful than a savings slide.
 
 ---
 
-## 10. Build plan
+## 10. Status and how to run it
 
-Each step is useful on its own. Nothing depends on a later step to be real.
-
-| Step | Deliverable | Useful alone because |
+| Step | Deliverable | Status |
 |---|---|---|
-| 1 | `world/` + `data/` + `quality/` | Inspectable synthetic fleet with known truth; coverage and quality reports |
-| 2 | `harness/` validated against the oracle | A DS can run importance/ablation/cross-OEM on any `DataSource` |
-| 3 | `economics/` + deployment-fit rubric | CLI prints run cost and ROI distribution for any signal set |
-| 4 | `policy/` + `ledger/` + `report/` | Headless end-to-end run produces a fully cited brief |
-| 5 | `agent/` + `api/` | Free-text requests, follow-up Q&A, persisted runs |
-| 6 | `web/` | Reasoning trail and evidence drill-down for PMs |
-| 7 | `SnowflakeSource` | The step that turns a demonstration into a finding |
+| 1 | `world/` + `data/` + `quality/` — synthetic fleet with known truth, DataSource seam, leakage detector | done, tested |
+| 2 | `harness/` — importance, ablation, temporal, cross-OEM, comparison; validated against the oracle | done, tested |
+| 3 | `economics/` — sourced price sheet, cost, PERT Monte Carlo ROI, operating point, tornado, deployment fit | done, tested |
+| 4 | `policy/` + `ledger/` + `report/` — verdict, provenance store, fail-closed cited brief; headless runner | done, tested |
+| 5 | `agent/llm.py` + `api.py` — free text to spec, cited narrative, Q&A over evidence; HTTP API | done, tested with a stub client |
+| 6 | `web/` — runs, gates/flags, charts, cited brief with evidence drill-down, Q&A | done |
+| 7 | `SnowflakeSource` — production adapter | done, tested against a production-shaped fake; live connection needs credentials |
+
+```bash
+uv sync --extra dev --extra api --extra agent        # python 3.12
+uv run mde world generate --profile small             # ~7 s; `default` (5k vehicles, 18 months) ~2 min
+uv run mde run headless --example brake --out brief.md
+uv run mde run list
+uv run mde run evidence ev_<id>
+
+# LLM interface (optional): set ANTHROPIC_API_KEY
+uv run mde run ask "Should Fuse flag vehicles likely to need brake service in the next 7 days?"
+uv run mde ask <run_id> "Why was GPS excluded?"
+
+# API + dashboard
+uv run mde serve                                      # http://127.0.0.1:8000
+cd web && npm install && npm run dev                  # http://localhost:3000 (MDE_API_URL to point elsewhere)
+docker compose up --build                             # Postgres + API + dashboard
+
+# tests (fast suite ~4 min; slow integration ~10 min; oracle on the default dataset ~40 min)
+uv run pytest tests -q -m "not slow"
+uv run pytest tests -q -m slow
+MDE_ORACLE_DATASET=data/synthetic/<hash> uv run pytest tests/oracle -q
+```
 
 ---
 

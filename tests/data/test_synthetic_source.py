@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pandas as pd
 
-from motorq_de.data.snowflake import SnowflakeSource
 from motorq_de.data.source import DataSource
 from motorq_de.schemas import ProblemSpec
 
@@ -52,13 +51,3 @@ def test_signal_metadata_and_catalog(source):
     assert len(sigs) >= 85
     m = source.signal_metadata("brake_pad_wear_pct")
     assert m.category == "health" and m.declared_frequency == "daily"
-
-
-def test_snowflake_stub_documents_sql():
-    s = SnowflakeSource({}, "MOTORQ", "NORMALIZED")
-    try:
-        s.list_signals()
-    except NotImplementedError as e:
-        assert "SIGNAL_CATALOG" in str(e)
-    else:
-        raise AssertionError("stub should raise")
