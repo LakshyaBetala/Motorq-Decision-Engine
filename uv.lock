@@ -43,6 +43,12 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c0/dc/74995efda028421917f4caabd24db1373ee0742573a2363fff1a21191441/anthropic-1.7.0-py3-none-any.whl", hash = "sha256:6b681b6ee00f232bb54f50f9a0d6d30e7be368c1b6f754bfd470c8385b8b6058", size = 1255606, upload-time = "2026-09-18T16:13:03.725Z" },
 ]
 
+[package.optional-dependencies]
+bedrock = [
+    { name = "boto3" },
+    { name = "botocore" },
+]
+
 [[package]]
 name = "anyio"
 version = "4.15.1"
@@ -542,6 +548,7 @@ name = "motorq-de"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "joblib" },
     { name = "lightgbm" },
     { name = "numpy" },
     { name = "pandas" },
@@ -564,6 +571,9 @@ api = [
     { name = "psycopg", extra = ["binary"] },
     { name = "uvicorn", extra = ["standard"] },
 ]
+bedrock = [
+    { name = "anthropic", extra = ["bedrock"] },
+]
 dev = [
     { name = "import-linter" },
     { name = "pytest" },
@@ -582,8 +592,10 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", marker = "extra == 'agent'", specifier = ">=0.30" },
+    { name = "anthropic", extras = ["bedrock"], marker = "extra == 'bedrock'", specifier = ">=0.30" },
     { name = "fastapi", marker = "extra == 'api'", specifier = ">=0.111" },
     { name = "import-linter", marker = "extra == 'dev'", specifier = ">=2.0" },
+    { name = "joblib", specifier = ">=1.4" },
     { name = "lightgbm", specifier = ">=4.3" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pandas", specifier = ">=2.2,<3" },
@@ -602,7 +614,7 @@ requires-dist = [
     { name = "typer", specifier = ">=0.12" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'api'", specifier = ">=0.30" },
 ]
-provides-extras = ["api", "agent", "snowflake", "dev"]
+provides-extras = ["api", "agent", "snowflake", "bedrock", "dev"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "httpx", specifier = ">=0.28.1" }]

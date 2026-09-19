@@ -25,6 +25,7 @@ from motorq_de.harness.models import (
     grouped_folds,
     make_model,
     oof_predictions,
+    run_folds,
     temporal_split,
 )
 from motorq_de.schemas import ProblemSpec
@@ -34,7 +35,7 @@ BOOT_B = 300
 ABLATION_TOLERANCE = 0.005
 NONINFERIORITY_CONFIDENCE = 0.80
 MIN_POS_FOR_OEM = 25
-ALERT_RATES = (0.005, 0.01, 0.02, 0.05, 0.10)
+ALERT_RATES = (0.0025, 0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.10, 0.15, 0.20)
 PERM_MAX_ROWS = 8_000  # rows per fold used for permutation importance
 ABLATION_SCREEN_K = 20
 SINGLE_SIGNAL_CANDIDATES = 3  # signals kept after the importance screen before elimination
@@ -56,27 +57,77 @@ def _summary(M: Matrix) -> dict[str, Any]:
     }
 
 
-def _operating_metrics(y, s, w) -> dict[str, Any]:
+def _operating_metrics(y, s, w, M: Matrix | None = None, horizon_days: int = 7) -> dict[str, Any]:
     r50 = stats.recall_at_precision(y, s, 0.5, w)
     r30 = stats.recall_at_precision(y, s, 0.3, w)
+    points = []
+    for f in ALERT_RATES:
+        p = {
+            "alert_rate": f,
+            "recall": round(stats.recall_at_top_fraction(y, s, f, w), 6),
+            "precision": round(stats.precision_at_top_fraction(y, s, f, w), 6),
+        }
+        if M is not None:
+            ev = stats.event_level_metrics(
+                y, s, w, M.groups, M.dates, M.days_to_event, horizon_days, f
+            )
+            p.update(
+                {
+                    "event_recall": None
+                    if not np.isfinite(ev["event_recall"])
+                    else round(ev["event_recall"], 6),
+                    "median_lead_days": None
+                    if not np.isfinite(ev["median_lead_days"])
+                    else round(ev["median_lead_days"], 3),
+                    "false_alerts_per_100_vehicle_months": round(
+                        ev["false_alerts_per_100_vehicle_months"], 6
+                    ),
+                    "n_events": ev["n_events"],
+                }
+            )
+        points.append(p)
     return {
         "pr_auc": round(stats.pr_auc(y, s, w), 6),
         "brier": round(stats.brier(y, s, w), 6),
         "recall_at_precision_0_5": round(r50, 6),
         "recall_at_precision_0_3": round(r30, 6),
-        "operating_points": [
-            {
-                "alert_rate": f,
-                "recall": round(stats.recall_at_top_fraction(y, s, f, w), 6),
-                "precision": round(stats.precision_at_top_fraction(y, s, f, w), 6),
-            }
-            for f in ALERT_RATES
-        ],
+        "operating_points": points,
     }
 
 
 def _signal_columns(M: Matrix, sid: str) -> list[int]:
     return [i for i, s in enumerate(M.signal_of) if s == sid]
+
+
+def _perm_fold(
+    X,
+    y,
+    w,
+    seed: int,
+    signals: list[str],
+    signal_cols: dict[str, list[int]],
+    tr,
+    te,
+    n_threads: int,
+):
+    """One CV fold: fit, predict the held-out rows, and permutation-drop every signal."""
+    m = make_model("lightgbm", seed, n_threads)
+    m.fit(X[tr], y[tr], sample_weight=w[tr])
+    p = m.predict_proba(X[te])[:, 1]
+    rng = np.random.default_rng(seed)
+    # permutation importance on a capped, stratified subset of the fold
+    sub = te if len(te) <= PERM_MAX_ROWS else np.sort(rng.choice(te, PERM_MAX_ROWS, replace=False))
+    base = stats.fast_auc(y[sub], m.predict_proba(X[sub])[:, 1], w[sub])
+    Xs = X[sub]
+    drops: dict[str, float] = {}
+    for sid in signals:
+        cols = signal_cols[sid]
+        Xp = Xs.copy()
+        perm = rng.permutation(len(sub))
+        Xp[:, cols] = Xp[perm][:, cols]
+        pp = m.predict_proba(Xp)[:, 1]
+        drops[sid] = base - stats.fast_auc(y[sub], pp, w[sub])
+    return p, drops
 
 
 # --------------------------------------------------------------------------- tools
@@ -91,31 +142,17 @@ def feature_analysis(
 ) -> dict[str, Any]:
     M = store.matrix(spec, signals)
     seed = spec.seed
+    signal_cols = {s: _signal_columns(M, s) for s in M.signals}
     perm_drops: dict[str, list[float]] = {s: [] for s in M.signals}
     oofs = []
     for r in range(n_repeats):
+        folds = list(grouped_folds(M.y, M.groups, N_SPLITS, seed + r))
+        results = run_folds(_perm_fold, folds, M.X, M.y, M.w, seed + r, M.signals, signal_cols)
         oof = np.full(len(M.y), np.nan)
-        for tr, te in grouped_folds(M.y, M.groups, N_SPLITS, seed + r):
-            m = make_model("lightgbm", seed + r)
-            m.fit(M.X[tr], M.y[tr], sample_weight=M.w[tr])
-            p = m.predict_proba(M.X[te])[:, 1]
+        for (_, te), (p, drops) in zip(folds, results, strict=True):
             oof[te] = p
-            rng = np.random.default_rng(seed + r)
-            # permutation importance on a capped, stratified subset of the fold
-            sub = (
-                te
-                if len(te) <= PERM_MAX_ROWS
-                else np.sort(rng.choice(te, PERM_MAX_ROWS, replace=False))
-            )
-            base = stats.fast_auc(M.y[sub], m.predict_proba(M.X[sub])[:, 1], M.w[sub])
-            Xs = M.X[sub]
-            for sid in M.signals:
-                cols = _signal_columns(M, sid)
-                Xp = Xs.copy()
-                perm = rng.permutation(len(sub))
-                Xp[:, cols] = Xp[perm][:, cols]
-                pp = m.predict_proba(Xp)[:, 1]
-                perm_drops[sid].append(base - stats.fast_auc(M.y[sub], pp, M.w[sub]))
+            for sid, d in drops.items():
+                perm_drops[sid].append(d)
         oofs.append(oof)
     auc_ci = stats.cluster_bootstrap_auc(M.y, oofs[0], M.groups, M.w, BOOT_B, seed)
     repeat_aucs = [stats.fast_auc(M.y, o, M.w) for o in oofs]
@@ -153,7 +190,7 @@ def feature_analysis(
         "n_splits": N_SPLITS,
         "auc": auc_ci.as_dict(),
         "auc_by_repeat": [round(a, 6) for a in repeat_aucs],
-        **_operating_metrics(M.y, oofs[0], M.w),
+        **_operating_metrics(M.y, oofs[0], M.w, M, spec.horizon_days),
         "ranking": ranking,
         "order_least_to_most_important": [r["signal"] for r in reversed(ranking)],
     }
@@ -167,20 +204,38 @@ def ablation(
     tolerance: float = ABLATION_TOLERANCE,
     min_signals: int = 1,
     screen_k: int = ABLATION_SCREEN_K,
+    signal_cost: dict[str, float] | None = None,
+    importance: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """Two-stage: importance screen to the top `screen_k` signals, then ordered backward elimination.
 
     Remove the least important signal, refit (grouped 5-fold OOF), and test non-inferiority
     of the reduced set against the FULL set: accept if >= 80% of paired cluster-bootstrap
-    replicates of AUC(reduced) - AUC(full) exceed -tolerance. Stop at the first rejection; the
-    sufficient set is the last accepted set. `underpowered` is reported when the bootstrap
-    cannot resolve tolerance/2.
+    replicates of AUC(reduced) - AUC(full) exceed -tolerance. A rejected signal is kept and
+    elimination continues over the remaining candidates; the sufficient set is what survives.
+
+    `underpowered` is reported when an ACCEPTED removal rests on a bootstrap that cannot
+    resolve tolerance/2 - the only direction in which low power can mislead (a signal dropped
+    that was actually needed). A rejected removal with a wide interval is not a power problem:
+    the signal is kept, which is the conservative outcome. Rejections whose interval still
+    reaches into the non-inferior region are listed as `kept_conservatively`.
     """
     seed = spec.seed
     if order_least_to_most is None:
         fa = feature_analysis(store, spec, signals, n_repeats=1)
         order_least_to_most = fa["order_least_to_most_important"]
+        importance = importance or {r["signal"]: r["perm_importance"] for r in fa["ranking"]}
     order_all = [s for s in order_least_to_most if s in set(signals)]
+    # cost-aware ordering: remove the least importance-per-dollar first, so the sufficient set
+    # is the cheapest non-inferior set rather than merely a small one
+    if signal_cost and importance:
+        eps = 1e-9
+        order_all = sorted(
+            order_all,
+            key=lambda sid: (
+                max(importance.get(sid, 0.0), 0.0) / max(signal_cost.get(sid, 0.0), eps)
+            ),
+        )
     # stage 1 - importance screen: keep the top-K; the rest are removed without refitting
     screened_out = order_all[: max(0, len(order_all) - screen_k)]
     kept = [s for s in signals if s not in set(screened_out)]
@@ -205,8 +260,11 @@ def ablation(
         }
     ]
     n_fits = N_SPLITS
-    stop_reason = "reached_min_signals"
+    stop_reason = "all_candidates_tested"
     any_underpowered = False
+    accepted_resolution = 0.0
+    kept_needed: list[str] = []
+    kept_conservatively: list[str] = []
     for step, sid in enumerate(order, start=1):
         if len(current) - 1 < min_signals:
             break
@@ -219,12 +277,16 @@ def ablation(
             M.y, s_red, s_full, M.groups, M.w, BOOT_B, seed + step
         )
         resolution = delta.half_width
-        underpowered = resolution > tolerance / 2
         # non-inferiority: accept the removal if at least NONINFERIORITY_CONFIDENCE of the
         # paired bootstrap replicates show a drop smaller than `tolerance`
         p_ok = delta.prob_greater_than(-tolerance)
         ok = p_ok >= NONINFERIORITY_CONFIDENCE
-        any_underpowered = any_underpowered or underpowered
+        # only an accepted removal can be misled by low power; a wide interval on a clear
+        # drop (removing the main sensor) is expected, not a resolution problem
+        underpowered = ok and resolution > tolerance / 2
+        if ok:
+            any_underpowered = any_underpowered or underpowered
+            accepted_resolution = max(accepted_resolution, resolution)
         trace.append(
             {
                 "step": step,
@@ -241,8 +303,17 @@ def ablation(
         if ok:
             current, accepted, accepted_pred = candidate, candidate, s_red
         else:
-            stop_reason = f"removing_{sid}_is_materially_worse"
-            break
+            # the signal is needed: keep it and continue testing the remaining candidates, so a
+            # cheap uninformative signal cannot hide behind an expensive necessary one
+            kept_needed.append(sid)
+            if delta.hi > -tolerance:
+                kept_conservatively.append(sid)
+    if kept_needed:
+        stop_reason = "all_candidates_tested; kept as needed: " + ", ".join(kept_needed)
+    elif len(current) <= min_signals:
+        stop_reason = "reached_min_signals"
+    else:
+        stop_reason = "all_candidates_tested"
     suff_auc = stats.cluster_bootstrap_auc(
         M_full.y, accepted_pred, M_full.groups, M_full.w, BOOT_B, seed
     )
@@ -251,6 +322,7 @@ def ablation(
         **_summary(M_full),
         "tolerance": tolerance,
         "noninferiority_confidence": NONINFERIORITY_CONFIDENCE,
+        "cost_aware": bool(signal_cost and importance),
         "screen_k": screen_k,
         "screened_out": screened_out,
         "candidate_set": list(M_full.signals),
@@ -258,9 +330,11 @@ def ablation(
         "sufficient_set": accepted,
         "sufficient_auc": suff_auc.as_dict(),
         "removed_in_order": removed,
+        "kept_as_needed": kept_needed,
+        "kept_conservatively": kept_conservatively,
         "stop_reason": stop_reason,
         "underpowered": bool(any_underpowered),
-        "resolution": round(float(max((t.get("resolution", 0.0) for t in trace), default=0.0)), 6),
+        "resolution": round(float(accepted_resolution), 6),
         "trace": trace,
         "n_fits": n_fits,
         **{
@@ -341,11 +415,34 @@ def cross_oem_validation(
         ci = stats.cluster_bootstrap_auc(M.y[te], p, M.groups[te], M.w[te], BOOT_B, seed)
         # how much of this OEM's feature matrix is missing (coverage gaps show up here)
         missing = float(np.mean(~np.isfinite(M.X[te])))
+        # within-OEM benchmark: a model trained on this OEM alone. within ~ held-out means the
+        # OEM lacks signal; within >> held-out means the model does not transfer.
+        within = None
+        if n_pos >= 2 * MIN_POS_FOR_OEM and len(np.unique(M.groups[te])) >= N_SPLITS:
+            oof_w = oof_predictions(
+                "lightgbm", M.X[te], M.y[te], M.w[te], M.groups[te], N_SPLITS, seed
+            )
+            within = stats.cluster_bootstrap_auc(
+                M.y[te], oof_w, M.groups[te], M.w[te], BOOT_B, seed
+            ).as_dict()
         per_oem[oem] = {
             "n_rows": int(len(te)),
             "n_pos": n_pos,
             "auc": ci.as_dict(),
             "feature_missing_share": round(missing, 6),
+            "within_oem_auc": within,
+            "transfer_gap": round(within["point"] - ci.point, 6) if within else None,
+            "diagnosis": (
+                None
+                if within is None
+                else (
+                    "does_not_transfer"
+                    if within["point"] - ci.point > 0.03
+                    else "oem_lacks_signal"
+                    if within["point"] < 0.75
+                    else "ok"
+                )
+            ),
         }
         aucs.append(ci.point)
     arr = np.array(aucs)
@@ -385,7 +482,10 @@ def model_comparison(
         for model in models:
             oof = oof_predictions(model, M.X, M.y, M.w, M.groups, N_SPLITS, seed)
             ci = stats.cluster_bootstrap_auc(M.y, oof, M.groups, M.w, BOOT_B, seed)
-            entry["models"][model] = {"auc": ci.as_dict(), **_operating_metrics(M.y, oof, M.w)}
+            entry["models"][model] = {
+                "auc": ci.as_dict(),
+                **_operating_metrics(M.y, oof, M.w, M, spec.horizon_days),
+            }
         # fair single-signal baseline: a one-signal model on the SAME population (univariate
         # AUC on available rows only would flatter signals with partial coverage)
         raw_cols = [M.feature_names.index(s) for s in M.signals]

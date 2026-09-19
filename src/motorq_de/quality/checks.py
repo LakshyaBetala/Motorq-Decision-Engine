@@ -67,11 +67,24 @@ def coverage_report(source: DataSource, signals: list[str]) -> dict[str, Any]:
     }
 
 
+QUALITY_BATCH = 16
+
+
 def quality_report(source: DataSource, signals: list[str]) -> dict[str, Any]:
     rows: dict[str, dict[str, Any]] = {}
     flags: dict[str, list[str]] = {}
-    for sid in signals:
-        q = source.quality(sid)
+    read_many = getattr(source, "read_signals", None)
+    for start in range(0, len(signals), QUALITY_BATCH):
+        batch = signals[start : start + QUALITY_BATCH]
+        frame = read_many(batch) if read_many else None  # one read per batch instead of per signal
+        for sid in batch:
+            q = source.quality(sid, frame=frame) if frame is not None else source.quality(sid)
+            _quality_row(sid, q, rows, flags)
+    return {"signals": signals, "per_signal": rows, "flags": flags}
+
+
+def _quality_row(sid: str, q, rows: dict, flags: dict) -> None:
+    if q is not None:
         f: list[str] = []
         if q.nonnull_rate < MIN_NONNULL:
             f.append("sparse")
@@ -93,7 +106,6 @@ def quality_report(source: DataSource, signals: list[str]) -> dict[str, Any]:
         }
         if f:
             flags[sid] = f
-    return {"signals": signals, "per_signal": rows, "flags": flags}
 
 
 def leakage_check(source: DataSource, spec: ProblemSpec, signals: list[str]) -> dict[str, Any]:

@@ -156,3 +156,20 @@ def test_thresholds_are_reported_on_results():
     g = {x.name: x for x in v.gates}
     assert g["economics"].threshold == THRESHOLDS["p_roi_positive"]
     assert g["data"].threshold == 0.6
+
+
+def test_policy_thresholds_come_from_yaml():
+    from motorq_de.policy.verdict import POLICY_VERSION
+
+    assert POLICY_VERSION == "1.1"
+    assert THRESHOLDS["false_alerts_per_100_vehicle_months_max"] == 25.0
+
+
+def test_alert_burden_flag():
+    ev = bundle()
+    ev.put("operating_point", {"chosen": {"false_alerts_per_100_vehicle_months": 40.0}}, "ev_op")
+    v = decide(spec(validated=True), ev)
+    assert v.decision == "PILOT"
+    assert [f.name for f in v.flags if f.tripped] == ["alert_burden"]
+    ev.put("operating_point", {"chosen": {"false_alerts_per_100_vehicle_months": 5.0}}, "ev_op")
+    assert decide(spec(validated=True), ev).decision == "BUILD_READY"

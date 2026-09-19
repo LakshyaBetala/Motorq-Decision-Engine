@@ -22,6 +22,12 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       MDE_LLM_MODEL: ${MDE_LLM_MODEL:-claude-opus-5}
       MDE_SNOWFLAKE_CONFIG: ${MDE_SNOWFLAKE_CONFIG:-}
+      MDE_WEBHOOK_URL: ${MDE_WEBHOOK_URL:-}
+      MDE_DASHBOARD_URL: ${MDE_DASHBOARD_URL:-http://localhost:3000}
+      MDE_CPUS: ${MDE_CPUS:-4}
+    deploy:
+      resources:
+        limits: { cpus: "${MDE_CPUS:-4}" }
     volumes: [mdedata:/app/data]
     ports: ["8000:8000"]
     depends_on:

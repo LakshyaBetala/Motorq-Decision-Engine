@@ -93,8 +93,11 @@ class FrameSource(ABC):
             )
         return out
 
-    def quality(self, signal_id: str, window: DateWindow | None = None) -> QualityStat:
-        df = self._column(signal_id)
+    def quality(
+        self, signal_id: str, window: DateWindow | None = None, frame: pd.DataFrame | None = None
+    ) -> QualityStat:
+        df = self._column(signal_id) if frame is None else frame[["vehicle_id", "date", signal_id]]
+        df = df.copy()
         df["date"] = pd.to_datetime(df["date"])
         if window:
             df = df[

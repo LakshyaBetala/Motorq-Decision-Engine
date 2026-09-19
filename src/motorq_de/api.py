@@ -15,10 +15,13 @@ GET  /runs/{run_id}/messages
 
 from __future__ import annotations
 
+import asyncio
+import json
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
 from motorq_de.agent.service import EXAMPLE_SPECS, Service
@@ -45,6 +48,12 @@ class RunRequest(BaseModel):
 
 class AskRequest(BaseModel):
     question: str
+
+
+class WhatIfRequest(BaseModel):
+    value: dict[str, Any] | None = None
+    price_overrides: dict[str, Any] | None = None
+    constraints: dict[str, Any] | None = None
 
 
 @app.get("/health")
@@ -146,3 +155,72 @@ def ask(run_id: str, req: AskRequest) -> dict[str, Any]:
 @app.get("/runs/{run_id}/messages")
 def messages(run_id: str) -> list[dict[str, Any]]:
     return service().ledger.messages(run_id)
+
+
+@app.post("/runs/{run_id}/whatif")
+def whatif(run_id: str, req: WhatIfRequest) -> dict[str, Any]:
+    """Re-run economics -> policy -> brief with new human inputs; seconds, reuses harness evidence."""
+    s = service()
+    if s.ledger.get_run(run_id) is None:
+        raise HTTPException(404, "run not found")
+    try:
+        res = s.whatif(run_id, req.value, req.price_overrides, req.constraints)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"run_id": res.run_id, "decision": res.verdict.decision, "derived_from": run_id}
+
+
+@app.post("/runs/{run_id}/replay")
+def replay(run_id: str) -> dict[str, Any]:
+    """Queue a full replay of a study; the new run stores an evidence-by-evidence diff."""
+    s = service()
+    if s.ledger.get_run(run_id) is None:
+        raise HTTPException(404, "run not found")
+    ticket = "t_" + __import__("uuid").uuid4().hex[:10]
+    fut = s._pool.submit(s.replay, run_id)
+    with s._lock:
+        s._futures[ticket] = fut
+    return {"ticket": ticket, "replay_of": run_id}
+
+
+@app.get("/runs/{run_id}/brief.md", response_class=PlainTextResponse)
+def brief_markdown(run_id: str) -> str:
+    run = service().ledger.get_run(run_id)
+    if run is None or not run["brief_md"]:
+        raise HTTPException(404, "brief not found")
+    return run["brief_md"]
+
+
+@app.get("/runs/{run_id}/events")
+async def events(run_id: str):
+    """Server-sent events with step progress until the run finishes."""
+    s = service()
+
+    async def gen():
+        last = None
+        while True:
+            run = s.ledger.get_run(run_id)
+            if run is None:
+                yield "event: error\ndata: {}\n\n"
+                return
+            snap = json.dumps(
+                {
+                    "status": run["status"],
+                    "steps": run["steps"],
+                    "n_evidence": len(run["evidence"]),
+                    "decision": (run["verdict"] or {}).get("decision"),
+                }
+            )
+            if snap != last:
+                yield f"data: {snap}\n\n"
+                last = snap
+            if run["status"] in ("done", "failed"):
+                return
+            await asyncio.sleep(2)
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.get("/portfolio")
+def portfolio_view() -> dict[str, Any]:
+    return service().portfolio()

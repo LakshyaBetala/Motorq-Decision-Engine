@@ -4,6 +4,7 @@ runs on the same dataset/spec produce identical evidence outputs."""
 
 from __future__ import annotations
 
+import json
 import re
 
 import pytest
@@ -92,3 +93,61 @@ def test_headless_is_deterministic(source, brake_spec, result):
     assert res1.verdict.decision == res2.verdict.decision
     assert strip(res1.verdict.gates) == strip(res2.verdict.gates)
     assert strip(res1.verdict.flags) == strip(res2.verdict.flags)
+
+
+def test_whatif_reuses_harness_evidence_and_recomputes_economics(source, brake_spec, result):
+    res, led = result
+    runner = Runner(source, led)
+    new_value = brake_spec.value.model_copy(
+        update={
+            "value_bearing_fraction": brake_spec.value.value_bearing_fraction.model_copy(
+                update={"low": 0.5, "base": 0.7, "high": 0.9}
+            )
+        }
+    )
+    w = runner.whatif(res.run_id, value=new_value)
+    run = led.get_run(w.run_id)
+    assert run["kind"] == "whatif" and run["derived_from"] == res.run_id
+    # harness evidence is the parent's (same ids); economics is new
+    assert w.evidence["ablation"].evidence_id == res.evidence["ablation"].evidence_id
+    assert w.evidence["roi"].evidence_id != res.evidence["roi"].evidence_id
+    assert (
+        w.evidence["roi"].outputs["p_roi_positive"] > res.evidence["roi"].outputs["p_roi_positive"]
+    )
+    check_citations(w.brief)
+    # what-if runs in seconds: no harness steps recorded
+    assert [s["name"] for s in run["steps"]] == [
+        "DEFINE",
+        "ECONOMICS",
+        "DELIVERY",
+        "POLICY",
+        "REPORT",
+    ]
+
+
+def test_replay_is_identical(source, brake_spec, result):
+    res, led = result
+    rep = Runner(source, led).replay(res.run_id)
+    assert rep.diff is not None and rep.diff["identical"] is True, [
+        r for r in rep.diff["records"] if r["status"] != "identical"
+    ]
+    assert led.get_run(rep.run_id)["kind"] == "replay"
+
+
+def test_no_vehicle_ids_leak_into_evidence_or_brief(source, result):
+    res, led = result
+    vins = set(source.vehicles()["vehicle_id"].head(50))
+    blob = json.dumps([e["outputs"] for e in led.evidence_for_run(res.run_id)]) + res.brief_md
+    assert not any(v in blob for v in vins)
+
+
+def test_event_level_operating_point_feeds_economics(result):
+    res, _ = result
+    ch = res.evidence["operating_point"].outputs["chosen"]
+    assert ch["recall_basis"] == "event"
+    assert ch["false_alerts_per_100_vehicle_months"] is not None
+    roi_in = res.evidence["roi"].outputs["inputs"]
+    assert (
+        roi_in["false_alerts_per_100_vehicle_months"] == ch["false_alerts_per_100_vehicle_months"]
+    )
+    assert "ablation_daily_cadence" in res.evidence and "cost_daily_cadence" in res.evidence

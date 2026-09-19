@@ -1,9 +1,14 @@
 """Headless runner: the default plan, end to end, with every tool call recorded as Evidence.
 
-This is what `--no-llm` executes and what the LLM agent extends. The stages mirror the
+This is what `mde run headless` executes and what the LLM agent extends. Stages mirror the
 README: DEFINE -> FEASIBILITY -> EXPERIMENT -> ECONOMICS -> DELIVERY -> POLICY -> REPORT,
 with code-level replan predicates (no LLM involved) that add evidence when a result is
 borderline.
+
+Two derived runs reuse a finished study's evidence:
+    whatif   re-runs ECONOMICS -> POLICY -> REPORT with new value assumptions or price
+             overrides in seconds, citing the parent's harness evidence
+    replay   re-runs the whole study from the stored spec and diffs every evidence record
 """
 
 from __future__ import annotations
@@ -15,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from motorq_de.data.source import DataSource
-from motorq_de.economics.cost import compare_costs, run_cost
+from motorq_de.economics.cost import compare_costs, load_price_sheet, run_cost
 from motorq_de.economics.deployment import deployment_fit
 from motorq_de.economics.value import choose_operating_point, roi_distribution, tornado
 from motorq_de.harness.experiments import (
@@ -37,9 +42,22 @@ from motorq_de.quality.checks import (
 )
 from motorq_de.report.brief import Brief, Line, build_brief
 from motorq_de.report.render import to_json, to_markdown
-from motorq_de.schemas import Evidence, ProblemSpec, Range, Verdict
+from motorq_de.schemas import Evidence, ProblemSpec, Range, ValueAssumptions, Verdict
 
 STAGES = ("DEFINE", "FEASIBILITY", "EXPERIMENT", "ECONOMICS", "DELIVERY", "POLICY", "REPORT")
+POLICY_INPUTS = (
+    "coverage_sufficient",
+    "model_comparison",
+    "roi",
+    "deployment",
+    "cross_oem",
+    "temporal",
+    "quality_sufficient",
+    "ablation",
+    "leakage",
+    "cost_sufficient",
+    "operating_point",
+)
 
 
 @dataclass
@@ -50,11 +68,15 @@ class RunResult:
     brief_md: str
     evidence: dict[str, Evidence]
     replans: list[str] = field(default_factory=list)
+    diff: dict[str, Any] | None = None
 
 
 class Runner:
     def __init__(
-        self, source: DataSource, ledger: Ledger, progress: Callable[[str], None] | None = None
+        self,
+        source: DataSource,
+        ledger: Ledger,
+        progress: Callable[[str], None] | None = None,
     ):
         self.source = source
         self.ledger = ledger
@@ -62,459 +84,659 @@ class Runner:
         self.progress = progress or (lambda _m: None)
 
     # ------------------------------------------------------------------ helpers
-    def _rec(
-        self,
-        run_id: str,
-        step: str,
-        name: str,
-        tool: str,
-        inputs: dict[str, Any],
-        seed: int,
-        fn: Callable[[], dict[str, Any]],
-        ev: dict[str, Evidence],
-    ) -> dict[str, Any]:
+    def _rec(self, run_id, step, name, tool, inputs, seed, fn, ev) -> dict[str, Any]:
         self.progress(f"{step}: {tool}")
-        e = self.ledger.record(run_id, step, tool, inputs, self.source.dataset_hash, seed, fn)
+        e = self.ledger.record(
+            run_id, step, tool, inputs, self.source.dataset_hash, seed, fn, name=name
+        )
         ev[name] = e
         return e.outputs
 
     def candidate_signals(self, spec: ProblemSpec) -> list[str]:
         metas = self.source.list_signals()
-        if spec.target_event == "battery_degradation_event":
+        if spec.powertrain_scope == "ev":
             return [m.signal_id for m in metas if m.powertrain in ("any", "ev")]
+        if spec.powertrain_scope == "ice":
+            return [m.signal_id for m in metas if m.powertrain in ("any", "ice")]
         return [m.signal_id for m in metas]
 
-    # ------------------------------------------------------------------ run
+    def _metas(self) -> dict[str, Any]:
+        return {m.signal_id: m for m in self.source.list_signals()}
+
+    def _signal_costs(self, signals: list[str], spec: ProblemSpec, prices) -> dict[str, float]:
+        """Marginal monthly cost of each signal on its own (drives cost-aware ablation)."""
+        metas = self._metas()
+        fleet = spec.value.fleet_size.base
+        out = {}
+        for s in signals:
+            c = run_cost([metas[s]], fleet, spec.delivery_mode, prices)["monthly"]
+            out[s] = c["infra_total"] + c["oem_api_calls"] + c["oem_marginal"]
+        return out
+
+    # ------------------------------------------------------------------ study
     def run(
         self,
         spec: ProblemSpec,
         request_text: str | None = None,
         llm_used: bool = False,
         narrative: Callable[[dict[str, Evidence], Verdict], list[Line]] | None = None,
+        kind: str = "study",
+        derived_from: str | None = None,
     ) -> RunResult:
         run_id = uuid.uuid4().hex[:12]
-        self.ledger.create_run(run_id, spec, self.source.dataset_hash, llm_used, request_text)
+        self.ledger.create_run(
+            run_id,
+            spec,
+            self.source.dataset_hash,
+            llm_used,
+            request_text,
+            derived_from=derived_from,
+            kind=kind,
+        )
         ev: dict[str, Evidence] = {}
         replans: list[str] = []
-        seed = spec.seed
+        prices = load_price_sheet()
         try:
-            # ---------------------------------------------------------- DEFINE
+            self._define(run_id, spec, ev)
+            usable, rate = self._feasibility(run_id, spec, ev)
+            suff = self._experiment(run_id, spec, ev, usable, replans, prices)
+            self._economics(run_id, spec, ev, usable, suff, rate, prices, replans)
+            self._delivery(run_id, spec, ev)
+            verdict = self._policy(run_id, spec, ev)
+            brief, md = self._report(run_id, spec, ev, verdict, llm_used, narrative)
+            return RunResult(run_id, verdict, brief, md, ev, replans)
+        except Exception as exc:  # record the failure, then re-raise
+            self.ledger.finish_run(run_id, None, None, None, error=f"{type(exc).__name__}: {exc}")
+            raise
+
+    # ------------------------------------------------------------------ stages
+    def _define(self, run_id, spec, ev) -> None:
+        sid = self.ledger.start_step(run_id, "DEFINE")
+        seed = spec.seed
+        self._rec(
+            run_id,
+            "DEFINE",
+            "spec",
+            "problem_spec",
+            {"spec": json.loads(spec.model_dump_json())},
+            seed,
+            lambda: json.loads(spec.model_dump_json()),
+            ev,
+        )
+        truth = getattr(self.source, "truth", lambda: {})()
+        if truth:
+            veh = self.source.vehicles()
+            dr = self.source.date_range()
+            t = dict(truth)
+            t["n_vehicles"] = int(len(veh))
+            t["n_days"] = int((dr.end - dr.start).days + 1)
+            self._rec(
+                run_id,
+                "DEFINE",
+                "dataset_truth",
+                "dataset_truth",
+                {"dataset_hash": self.source.dataset_hash},
+                seed,
+                lambda: t,
+                ev,
+            )
+        self.ledger.end_step(sid)
+
+    def _feasibility(self, run_id, spec, ev) -> tuple[list[str], Range]:
+        sid = self.ledger.start_step(run_id, "FEASIBILITY")
+        seed = spec.seed
+        cands = self.candidate_signals(spec)
+        er = self._rec(
+            run_id,
+            "FEASIBILITY",
+            "event_rate",
+            "event_rate",
+            {"target": spec.target_event, "population": spec.powertrain_scope},
+            seed,
+            lambda: event_rate(self.source, spec),
+            ev,
+        )
+        rate = Range(
+            low=er["rate_ci_lo"],
+            base=er["rate_per_vehicle_year"],
+            high=max(er["rate_ci_hi"], er["rate_per_vehicle_year"]),
+        )
+        q_all = self._rec(
+            run_id,
+            "FEASIBILITY",
+            "quality_all",
+            "quality_report",
+            {"signals": cands},
+            seed,
+            lambda: quality_report(self.source, cands),
+            ev,
+        )
+        lk = self._rec(
+            run_id,
+            "FEASIBILITY",
+            "leakage",
+            "leakage_check",
+            {"signals": cands, "horizon_days": spec.horizon_days, "target": spec.target_event},
+            seed,
+            lambda: leakage_check(self.source, spec, cands),
+            ev,
+        )
+        us = self._rec(
+            run_id,
+            "FEASIBILITY",
+            "usable",
+            "usable_signals",
+            {"signals": cands},
+            seed,
+            lambda: usable_signals(cands, q_all, lk),
+            ev,
+        )
+        usable = us["usable"]
+        self._rec(
+            run_id,
+            "FEASIBILITY",
+            "coverage_all",
+            "coverage_report",
+            {"signals": usable},
+            seed,
+            lambda: coverage_report(self.source, usable),
+            ev,
+        )
+        self.ledger.end_step(sid)
+        return usable, rate
+
+    def _experiment(self, run_id, spec, ev, usable, replans, prices) -> list[str]:
+        sid = self.ledger.start_step(run_id, "EXPERIMENT")
+        seed = spec.seed
+        fa = self._rec(
+            run_id,
+            "EXPERIMENT",
+            "feature_analysis",
+            "feature_analysis",
+            {"signals": usable, "n_repeats": 1},
+            seed,
+            lambda: feature_analysis(self.store, spec, usable, n_repeats=1),
+            ev,
+        )
+        order = fa["order_least_to_most_important"]
+        importance = {r["signal"]: r["perm_importance"] for r in fa["ranking"]}
+        costs = self._signal_costs(usable, spec, prices)
+        ab = self._rec(
+            run_id,
+            "EXPERIMENT",
+            "ablation",
+            "ablation",
+            {"signals": usable, "order": order, "cost_aware": True},
+            seed,
+            lambda: ablation(
+                self.store,
+                spec,
+                usable,
+                order_least_to_most=order,
+                signal_cost=costs,
+                importance=importance,
+            ),
+            ev,
+        )
+        suff = ab["sufficient_set"]
+        # cadence ablation: what does the capability lose if it only had daily/weekly signals?
+        metas = self._metas()
+        daily_only = [s for s in usable if metas[s].declared_frequency != "realtime"]
+        if 0 < len(daily_only) < len(usable):
+            order_daily = [s for s in order if s in set(daily_only)]
+            self._rec(
+                run_id,
+                "EXPERIMENT",
+                "ablation_daily_cadence",
+                "ablation",
+                {"signals": daily_only, "order": order_daily, "cadence": "daily_or_weekly"},
+                seed,
+                lambda: ablation(
+                    self.store,
+                    spec,
+                    daily_only,
+                    order_least_to_most=order_daily,
+                    signal_cost=costs,
+                    importance=importance,
+                ),
+                ev,
+            )
+        self._rec(
+            run_id,
+            "EXPERIMENT",
+            "coverage_sufficient",
+            "coverage_report",
+            {"signals": suff},
+            seed,
+            lambda: coverage_report(self.source, suff),
+            ev,
+        )
+        self._rec(
+            run_id,
+            "EXPERIMENT",
+            "quality_sufficient",
+            "quality_report",
+            {"signals": suff},
+            seed,
+            lambda: quality_report(self.source, suff),
+            ev,
+        )
+        sets = {"sufficient": suff, "full_usable": usable}
+        if "ablation_daily_cadence" in ev:
+            sets["daily_cadence"] = ev["ablation_daily_cadence"].outputs["sufficient_set"]
+        self._rec(
+            run_id,
+            "EXPERIMENT",
+            "model_comparison",
+            "model_comparison",
+            {"sets": sets},
+            seed,
+            lambda: model_comparison(self.store, spec, sets),
+            ev,
+        )
+        self._rec(
+            run_id,
+            "EXPERIMENT",
+            "temporal",
+            "temporal_validation",
+            {"signals": suff},
+            seed,
+            lambda: temporal_validation(self.store, spec, suff),
+            ev,
+        )
+        xo = self._rec(
+            run_id,
+            "EXPERIMENT",
+            "cross_oem",
+            "cross_oem_validation",
+            {"signals": suff},
+            seed,
+            lambda: cross_oem_validation(self.store, spec, suff),
+            ev,
+        )
+        # replan predicate: cross-OEM gap -> which required signals does the worst OEM lack?
+        if (
+            xo.get("worst_oem")
+            and xo.get("std_auc") is not None
+            and (xo["std_auc"] > 0.03 or (xo["mean_auc"] - xo["min_auc"]) > 0.05)
+        ):
+            replans.append("cross_oem_gap")
+            worst = xo["worst_oem"]
+            cov_s = ev["coverage_sufficient"].outputs
+            self._rec(
+                run_id,
+                "EXPERIMENT",
+                "cross_oem_gap",
+                "cross_oem_gap_analysis",
+                {"oem": worst, "signals": suff},
+                seed,
+                lambda: {
+                    "oem": worst,
+                    "missing_signals": [
+                        s for s in suff if not cov_s["per_signal"][s][worst]["emits"]
+                    ],
+                    "coverage_by_signal": {
+                        s: cov_s["per_signal"][s][worst]["coverage"] for s in suff
+                    },
+                    "auc_worst": xo["per_oem"][worst]["auc"],
+                    "auc_mean": xo["mean_auc"],
+                    "within_oem_auc": xo["per_oem"][worst].get("within_oem_auc"),
+                    "diagnosis": xo["per_oem"][worst].get("diagnosis"),
+                },
+                ev,
+            )
+        self.ledger.end_step(sid, note=";".join(replans) or None)
+        return suff
+
+    def _economics(self, run_id, spec, ev, usable, suff, rate, prices, replans) -> None:
+        sid = self.ledger.start_step(run_id, "ECONOMICS")
+        seed = spec.seed
+        metas = self._metas()
+        fleet = spec.value.fleet_size.base
+        cmp = ev["model_comparison"].outputs
+        cf = self._rec(
+            run_id,
+            "ECONOMICS",
+            "cost_full",
+            "run_cost",
+            {"signals": usable, "fleet_size": fleet, "delivery_mode": spec.delivery_mode},
+            seed,
+            lambda: run_cost([metas[s] for s in usable], fleet, spec.delivery_mode, prices),
+            ev,
+        )
+        cs = self._rec(
+            run_id,
+            "ECONOMICS",
+            "cost_sufficient",
+            "run_cost",
+            {"signals": suff, "fleet_size": fleet, "delivery_mode": spec.delivery_mode},
+            seed,
+            lambda: run_cost([metas[s] for s in suff], fleet, spec.delivery_mode, prices),
+            ev,
+        )
+        self._rec(
+            run_id,
+            "ECONOMICS",
+            "cost_compare",
+            "compare_costs",
+            {"full": ev["cost_full"].evidence_id, "reduced": ev["cost_sufficient"].evidence_id},
+            seed,
+            lambda: compare_costs(cf, cs),
+            ev,
+        )
+        if "daily_cadence" in cmp["sets"]:
+            daily = cmp["sets"]["daily_cadence"]["signals"]
+            self._rec(
+                run_id,
+                "ECONOMICS",
+                "cost_daily_cadence",
+                "run_cost",
+                {"signals": daily, "fleet_size": fleet, "delivery_mode": spec.delivery_mode},
+                seed,
+                lambda: run_cost([metas[s] for s in daily], fleet, spec.delivery_mode, prices),
+                ev,
+            )
+        lg = cmp["sets"]["sufficient"]["models"]["lightgbm"]
+        # recall uncertainty proxy: AUC CI half-width scaled; a direct recall bootstrap is a
+        # later refinement
+        rec_hw = (lg["auc"]["hi"] - lg["auc"]["lo"]) / 2 * 1.5
+        insp = Range(**prices["operations"]["inspection_cost_per_alert"])
+        op = self._rec(
+            run_id,
+            "ECONOMICS",
+            "operating_point",
+            "choose_operating_point",
+            {"operating_points": lg["operating_points"], "recall_ci_halfwidth": rec_hw},
+            seed,
+            lambda: choose_operating_point(
+                spec.value,
+                rate,
+                lg["operating_points"],
+                rec_hw,
+                spec.horizon_days,
+                insp,
+                cs["monthly"]["marginal_total"],
+                cs["monthly"]["build_amortized"],
+                seed,
+            ),
+            ev,
+        )
+        ch = op["chosen"]
+        recall = Range(
+            low=max(0.0, ch["recall"] - rec_hw),
+            base=ch["recall"],
+            high=min(1.0, ch["recall"] + rec_hw),
+        )
+        fa_rate = ch.get("false_alerts_per_100_vehicle_months")
+        args = (
+            spec.horizon_days,
+            insp,
+            cs["monthly"]["marginal_total"],
+            cs["monthly"]["build_amortized"],
+            seed,
+        )
+        roi = self._rec(
+            run_id,
+            "ECONOMICS",
+            "roi",
+            "roi_distribution",
+            {
+                "event_rate": rate.model_dump(),
+                "recall": recall.model_dump(),
+                "alert_rate": ch["alert_rate"],
+                "false_alerts_per_100_vehicle_months": fa_rate,
+                "run_cost_month": cs["monthly"]["marginal_total"],
+            },
+            seed,
+            lambda: roi_distribution(
+                spec.value, rate, recall, ch["alert_rate"], *args, false_alerts_per_100vm=fa_rate
+            ),
+            ev,
+        )
+        self._rec(
+            run_id,
+            "ECONOMICS",
+            "tornado",
+            "tornado",
+            {"recall": recall.model_dump(), "alert_rate": ch["alert_rate"]},
+            seed,
+            lambda: tornado(
+                spec.value, rate, recall, ch["alert_rate"], *args, false_alerts_per_100vm=fa_rate
+            ),
+            ev,
+        )
+        # replan predicate: borderline economics -> widen value ranges and re-run ROI
+        if roi["p_roi_positive"] is not None and 0.4 <= roi["p_roi_positive"] <= 0.6:
+            replans.append("roi_borderline")
+            v = spec.value
+            wide = v.model_copy(
+                update={
+                    "usd_per_avoided_event": Range(
+                        low=v.usd_per_avoided_event.low * 0.5,
+                        base=v.usd_per_avoided_event.base,
+                        high=v.usd_per_avoided_event.high * 1.5,
+                    ),
+                    "preventable_fraction": Range(
+                        low=max(0.0, v.preventable_fraction.low * 0.5),
+                        base=v.preventable_fraction.base,
+                        high=min(1.0, v.preventable_fraction.high * 1.5),
+                    ),
+                }
+            )
+            self._rec(
+                run_id,
+                "ECONOMICS",
+                "roi_wide",
+                "roi_distribution",
+                {"widened": True, "recall": recall.model_dump()},
+                seed,
+                lambda: roi_distribution(
+                    wide, rate, recall, ch["alert_rate"], *args, false_alerts_per_100vm=fa_rate
+                ),
+                ev,
+            )
+        self.ledger.end_step(sid, note=";".join(r for r in replans if r.startswith("roi")) or None)
+
+    def _delivery(self, run_id, spec, ev) -> None:
+        sid = self.ledger.start_step(run_id, "DELIVERY")
+        self._rec(
+            run_id,
+            "DELIVERY",
+            "deployment",
+            "deployment_fit",
+            {"delivery_mode": spec.delivery_mode, "horizon_days": spec.horizon_days},
+            spec.seed,
+            lambda: deployment_fit(spec),
+            ev,
+        )
+        self.ledger.end_step(sid)
+
+    def _policy(self, run_id, spec, ev) -> Verdict:
+        sid = self.ledger.start_step(run_id, "POLICY")
+        bundle = EvidenceBundle()
+        for name in POLICY_INPUTS:
+            if name in ev:
+                bundle.put(name, ev[name].outputs, ev[name].evidence_id)
+        verdict = decide(spec, bundle)
+        self._rec(
+            run_id,
+            "POLICY",
+            "verdict",
+            "decision_policy",
+            {"policy_version": verdict.policy_version},
+            spec.seed,
+            lambda: json.loads(verdict.model_dump_json()),
+            ev,
+        )
+        self.ledger.end_step(sid, note=verdict.decision)
+        return verdict
+
+    def _report(self, run_id, spec, ev, verdict, llm_used, narrative) -> tuple[Brief, str]:
+        sid = self.ledger.start_step(run_id, "REPORT")
+        brief = build_brief(spec, run_id, self.source.dataset_hash, ev, verdict, llm_used=llm_used)
+        if narrative is not None:
+            brief = brief.model_copy(update={"narrative": tuple(narrative(ev, verdict))})
+        md = to_markdown(brief)
+        self.ledger.finish_run(run_id, verdict, md, to_json(brief))
+        self.ledger.end_step(sid)
+        return brief, md
+
+    # ------------------------------------------------------------------ derived runs
+    def whatif(
+        self,
+        parent_run_id: str,
+        value: ValueAssumptions | None = None,
+        price_overrides: dict[str, Any] | None = None,
+        constraints: dict[str, Any] | None = None,
+    ) -> RunResult:
+        """Re-run ECONOMICS -> POLICY -> REPORT on a finished study with new human inputs.
+        Harness evidence is reused (and cited) from the parent; economics is recomputed and
+        recorded under the new run. Seconds, not minutes."""
+        parent = self.ledger.get_run(parent_run_id)
+        if parent is None or parent["status"] != "done":
+            raise KeyError(f"run {parent_run_id} not found or not finished")
+        if parent["dataset_hash"] != self.source.dataset_hash:
+            raise ValueError("what-if must run on the parent's dataset")
+        spec = ProblemSpec.model_validate(parent["spec"])
+        update: dict[str, Any] = {}
+        if value is not None:
+            update["value"] = value
+        if constraints:
+            update["constraints"] = spec.constraints.model_copy(update=constraints)
+        spec = spec.model_copy(update=update)
+        prices = load_price_sheet()
+        if price_overrides:
+            prices = _deep_merge(prices, price_overrides)
+        ev = self.ledger.evidence_objects(parent_run_id)
+        usable = ev["usable"].outputs["usable"]
+        suff = ev["ablation"].outputs["sufficient_set"]
+        er = ev["event_rate"].outputs
+        rate = Range(
+            low=er["rate_ci_lo"],
+            base=er["rate_per_vehicle_year"],
+            high=max(er["rate_ci_hi"], er["rate_per_vehicle_year"]),
+        )
+        run_id = uuid.uuid4().hex[:12]
+        self.ledger.create_run(
+            run_id,
+            spec,
+            self.source.dataset_hash,
+            False,
+            None,
+            derived_from=parent_run_id,
+            kind="whatif",
+        )
+        replans: list[str] = []
+        try:
             sid = self.ledger.start_step(run_id, "DEFINE")
             self._rec(
                 run_id,
                 "DEFINE",
                 "spec",
                 "problem_spec",
-                {"spec": json.loads(spec.model_dump_json())},
-                seed,
+                {"spec": json.loads(spec.model_dump_json()), "derived_from": parent_run_id},
+                spec.seed,
                 lambda: json.loads(spec.model_dump_json()),
                 ev,
             )
-            truth = getattr(self.source, "truth", lambda: {})()
-            if truth:
-                veh = self.source.vehicles()
-                dr = self.source.date_range()
-                t = dict(truth)
-                t["n_vehicles"] = int(len(veh))
-                t["n_days"] = int((dr.end - dr.start).days + 1)
+            if price_overrides:
                 self._rec(
                     run_id,
                     "DEFINE",
-                    "dataset_truth",
-                    "dataset_truth",
-                    {"dataset_hash": self.source.dataset_hash},
-                    seed,
-                    lambda: t,
+                    "price_overrides",
+                    "price_overrides",
+                    {"overrides": price_overrides},
+                    spec.seed,
+                    lambda: {"overrides": price_overrides},
                     ev,
                 )
             self.ledger.end_step(sid)
-
-            # ---------------------------------------------------------- FEASIBILITY
-            sid = self.ledger.start_step(run_id, "FEASIBILITY")
-            cands = self.candidate_signals(spec)
-            er = self._rec(
-                run_id,
-                "FEASIBILITY",
-                "event_rate",
-                "event_rate",
-                {"target": spec.target_event, "population": spec.powertrain_scope},
-                seed,
-                lambda: event_rate(self.source, spec),
-                ev,
-            )
-            rate = Range(
-                low=er["rate_ci_lo"],
-                base=er["rate_per_vehicle_year"],
-                high=max(er["rate_ci_hi"], er["rate_per_vehicle_year"]),
-            )
-            q_all = self._rec(
-                run_id,
-                "FEASIBILITY",
-                "quality_all",
-                "quality_report",
-                {"signals": cands},
-                seed,
-                lambda: quality_report(self.source, cands),
-                ev,
-            )
-            lk = self._rec(
-                run_id,
-                "FEASIBILITY",
-                "leakage",
-                "leakage_check",
-                {"signals": cands, "horizon_days": spec.horizon_days, "target": spec.target_event},
-                seed,
-                lambda: leakage_check(self.source, spec, cands),
-                ev,
-            )
-            us = self._rec(
-                run_id,
-                "FEASIBILITY",
-                "usable",
-                "usable_signals",
-                {"signals": cands},
-                seed,
-                lambda: usable_signals(cands, q_all, lk),
-                ev,
-            )
-            usable = us["usable"]
-            self._rec(
-                run_id,
-                "FEASIBILITY",
-                "coverage_all",
-                "coverage_report",
-                {"signals": usable},
-                seed,
-                lambda: coverage_report(self.source, usable),
-                ev,
-            )
-            self.ledger.end_step(sid)
-
-            # ---------------------------------------------------------- EXPERIMENT
-            sid = self.ledger.start_step(run_id, "EXPERIMENT")
-            fa = self._rec(
-                run_id,
-                "EXPERIMENT",
-                "feature_analysis",
-                "feature_analysis",
-                {"signals": usable, "n_repeats": 1},
-                seed,
-                lambda: feature_analysis(self.store, spec, usable, n_repeats=1),
-                ev,
-            )
-            order = fa["order_least_to_most_important"]
-            ab = self._rec(
-                run_id,
-                "EXPERIMENT",
-                "ablation",
-                "ablation",
-                {"signals": usable, "order": order},
-                seed,
-                lambda: ablation(self.store, spec, usable, order_least_to_most=order),
-                ev,
-            )
-            suff = ab["sufficient_set"]
-            self._rec(
-                run_id,
-                "EXPERIMENT",
-                "coverage_sufficient",
-                "coverage_report",
-                {"signals": suff},
-                seed,
-                lambda: coverage_report(self.source, suff),
-                ev,
-            )
-            self._rec(
-                run_id,
-                "EXPERIMENT",
-                "quality_sufficient",
-                "quality_report",
-                {"signals": suff},
-                seed,
-                lambda: quality_report(self.source, suff),
-                ev,
-            )
-            cmp = self._rec(
-                run_id,
-                "EXPERIMENT",
-                "model_comparison",
-                "model_comparison",
-                {"sets": {"sufficient": suff, "full_usable": usable}},
-                seed,
-                lambda: model_comparison(
-                    self.store, spec, {"sufficient": suff, "full_usable": usable}
-                ),
-                ev,
-            )
-            self._rec(
-                run_id,
-                "EXPERIMENT",
-                "temporal",
-                "temporal_validation",
-                {"signals": suff},
-                seed,
-                lambda: temporal_validation(self.store, spec, suff),
-                ev,
-            )
-            xo = self._rec(
-                run_id,
-                "EXPERIMENT",
-                "cross_oem",
-                "cross_oem_validation",
-                {"signals": suff},
-                seed,
-                lambda: cross_oem_validation(self.store, spec, suff),
-                ev,
-            )
-            # replan predicate: cross-OEM gap -> explain which required signals the worst OEM lacks
-            if (
-                xo.get("worst_oem")
-                and xo.get("std_auc") is not None
-                and (xo["std_auc"] > 0.03 or (xo["mean_auc"] - xo["min_auc"]) > 0.05)
-            ):
-                replans.append("cross_oem_gap")
-                worst = xo["worst_oem"]
-                cov_s = ev["coverage_sufficient"].outputs
-                self._rec(
-                    run_id,
-                    "EXPERIMENT",
-                    "cross_oem_gap",
-                    "cross_oem_gap_analysis",
-                    {"oem": worst, "signals": suff},
-                    seed,
-                    lambda: {
-                        "oem": worst,
-                        "missing_signals": [
-                            s for s in suff if not cov_s["per_signal"][s][worst]["emits"]
-                        ],
-                        "coverage_by_signal": {
-                            s: cov_s["per_signal"][s][worst]["coverage"] for s in suff
-                        },
-                        "auc_worst": xo["per_oem"][worst]["auc"],
-                        "auc_mean": xo["mean_auc"],
-                    },
-                    ev,
-                )
-            self.ledger.end_step(sid, note=";".join(replans) or None)
-
-            # ---------------------------------------------------------- ECONOMICS
-            sid = self.ledger.start_step(run_id, "ECONOMICS")
-            metas = {m.signal_id: m for m in self.source.list_signals()}
-            fleet = spec.value.fleet_size.base
-            cf = self._rec(
-                run_id,
-                "ECONOMICS",
-                "cost_full",
-                "run_cost",
-                {"signals": usable, "fleet_size": fleet, "delivery_mode": spec.delivery_mode},
-                seed,
-                lambda: run_cost([metas[s] for s in usable], fleet, spec.delivery_mode),
-                ev,
-            )
-            cs = self._rec(
-                run_id,
-                "ECONOMICS",
-                "cost_sufficient",
-                "run_cost",
-                {"signals": suff, "fleet_size": fleet, "delivery_mode": spec.delivery_mode},
-                seed,
-                lambda: run_cost([metas[s] for s in suff], fleet, spec.delivery_mode),
-                ev,
-            )
-            self._rec(
-                run_id,
-                "ECONOMICS",
-                "cost_compare",
-                "compare_costs",
-                {"full": ev["cost_full"].evidence_id, "reduced": ev["cost_sufficient"].evidence_id},
-                seed,
-                lambda: compare_costs(cf, cs),
-                ev,
-            )
-            lg = cmp["sets"]["sufficient"]["models"]["lightgbm"]
-            # recall uncertainty proxy: AUC CI half-width scaled; a direct recall bootstrap is a later refinement
-            rec_hw = (lg["auc"]["hi"] - lg["auc"]["lo"]) / 2 * 1.5
-            insp = Range(**self._price_insp())
-            op = self._rec(
-                run_id,
-                "ECONOMICS",
-                "operating_point",
-                "choose_operating_point",
-                {"operating_points": lg["operating_points"], "recall_ci_halfwidth": rec_hw},
-                seed,
-                lambda: choose_operating_point(
-                    spec.value,
-                    rate,
-                    lg["operating_points"],
-                    rec_hw,
-                    spec.horizon_days,
-                    insp,
-                    cs["monthly"]["marginal_total"],
-                    cs["monthly"]["build_amortized"],
-                    seed,
-                ),
-                ev,
-            )
-            ch = op["chosen"]
-            recall = Range(
-                low=max(0.0, ch["recall"] - rec_hw),
-                base=ch["recall"],
-                high=min(1.0, ch["recall"] + rec_hw),
-            )
-            roi = self._rec(
-                run_id,
-                "ECONOMICS",
-                "roi",
-                "roi_distribution",
-                {
-                    "event_rate": rate.model_dump(),
-                    "recall": recall.model_dump(),
-                    "alert_rate": ch["alert_rate"],
-                    "run_cost_month": cs["monthly"]["marginal_total"],
-                },
-                seed,
-                lambda: roi_distribution(
-                    spec.value,
-                    rate,
-                    recall,
-                    ch["alert_rate"],
-                    spec.horizon_days,
-                    insp,
-                    cs["monthly"]["marginal_total"],
-                    cs["monthly"]["build_amortized"],
-                    seed,
-                ),
-                ev,
-            )
-            self._rec(
-                run_id,
-                "ECONOMICS",
-                "tornado",
-                "tornado",
-                {"recall": recall.model_dump(), "alert_rate": ch["alert_rate"]},
-                seed,
-                lambda: tornado(
-                    spec.value,
-                    rate,
-                    recall,
-                    ch["alert_rate"],
-                    spec.horizon_days,
-                    insp,
-                    cs["monthly"]["marginal_total"],
-                    cs["monthly"]["build_amortized"],
-                    seed,
-                ),
-                ev,
-            )
-            # replan predicate: borderline economics -> widen value ranges and re-run ROI
-            if roi["p_roi_positive"] is not None and 0.4 <= roi["p_roi_positive"] <= 0.6:
-                replans.append("roi_borderline")
-                wide = spec.value.model_copy(
-                    update={
-                        "usd_per_avoided_event": Range(
-                            low=spec.value.usd_per_avoided_event.low * 0.5,
-                            base=spec.value.usd_per_avoided_event.base,
-                            high=spec.value.usd_per_avoided_event.high * 1.5,
-                        ),
-                        "preventable_fraction": Range(
-                            low=max(0.0, spec.value.preventable_fraction.low * 0.5),
-                            base=spec.value.preventable_fraction.base,
-                            high=min(1.0, spec.value.preventable_fraction.high * 1.5),
-                        ),
-                    }
-                )
-                self._rec(
-                    run_id,
-                    "ECONOMICS",
-                    "roi_wide",
-                    "roi_distribution",
-                    {"widened": True, "recall": recall.model_dump()},
-                    seed,
-                    lambda: roi_distribution(
-                        wide,
-                        rate,
-                        recall,
-                        ch["alert_rate"],
-                        spec.horizon_days,
-                        insp,
-                        cs["monthly"]["marginal_total"],
-                        cs["monthly"]["build_amortized"],
-                        seed,
-                    ),
-                    ev,
-                )
-            self.ledger.end_step(
-                sid, note=";".join(r for r in replans if r.startswith("roi")) or None
-            )
-
-            # ---------------------------------------------------------- DELIVERY
-            sid = self.ledger.start_step(run_id, "DELIVERY")
-            self._rec(
-                run_id,
-                "DELIVERY",
-                "deployment",
-                "deployment_fit",
-                {"delivery_mode": spec.delivery_mode, "horizon_days": spec.horizon_days},
-                seed,
-                lambda: deployment_fit(spec),
-                ev,
-            )
-            self.ledger.end_step(sid)
-
-            # ---------------------------------------------------------- POLICY
-            sid = self.ledger.start_step(run_id, "POLICY")
-            bundle = EvidenceBundle()
-            for name in (
-                "coverage_sufficient",
-                "model_comparison",
-                "roi",
-                "deployment",
-                "cross_oem",
-                "temporal",
-                "quality_sufficient",
-                "ablation",
-                "leakage",
-                "cost_sufficient",
-            ):
-                if name in ev:
-                    bundle.put(name, ev[name].outputs, ev[name].evidence_id)
-            verdict = decide(spec, bundle)
-            self._rec(
-                run_id,
-                "POLICY",
-                "verdict",
-                "decision_policy",
-                {"policy_version": verdict.policy_version},
-                seed,
-                lambda: json.loads(verdict.model_dump_json()),
-                ev,
-            )
-            self.ledger.end_step(sid, note=verdict.decision)
-
-            # ---------------------------------------------------------- REPORT
-            sid = self.ledger.start_step(run_id, "REPORT")
-            brief = build_brief(
-                spec, run_id, self.source.dataset_hash, ev, verdict, llm_used=llm_used
-            )
-            if narrative is not None:
-                brief = brief.model_copy(update={"narrative": tuple(narrative(ev, verdict))})
-            md = to_markdown(brief)
-            self.ledger.finish_run(run_id, verdict, md, to_json(brief))
-            self.ledger.end_step(sid)
-            return RunResult(
-                run_id=run_id,
-                verdict=verdict,
-                brief=brief,
-                brief_md=md,
-                evidence=ev,
-                replans=replans,
-            )
-        except Exception as exc:  # record the failure, then re-raise
+            self._economics(run_id, spec, ev, usable, suff, rate, prices, replans)
+            self._delivery(run_id, spec, ev)
+            verdict = self._policy(run_id, spec, ev)
+            brief, md = self._report(run_id, spec, ev, verdict, False, None)
+            return RunResult(run_id, verdict, brief, md, ev, replans)
+        except Exception as exc:
             self.ledger.finish_run(run_id, None, None, None, error=f"{type(exc).__name__}: {exc}")
             raise
 
-    @staticmethod
-    def _price_insp() -> dict[str, float]:
-        from motorq_de.economics.cost import load_price_sheet
+    def replay(self, parent_run_id: str) -> RunResult:
+        """Re-run a study from its stored spec and diff every evidence record against the
+        original. Identical outputs prove the reliability contract on this dataset."""
+        parent = self.ledger.get_run(parent_run_id)
+        if parent is None:
+            raise KeyError(parent_run_id)
+        if parent["dataset_hash"] != self.source.dataset_hash:
+            raise ValueError(
+                f"replay needs dataset {parent['dataset_hash']}, runner has {self.source.dataset_hash}"
+            )
+        spec = ProblemSpec.model_validate(parent["spec"])
+        res = self.run(spec, kind="replay", derived_from=parent_run_id)
+        before = self.ledger.evidence_objects(parent_run_id)
+        diff = diff_evidence(before, res.evidence)
+        res.diff = diff
+        self.ledger.add_message(
+            res.run_id, "system", json.dumps({"replay_diff": diff}, default=str), []
+        )
+        return res
 
-        return dict(load_price_sheet()["operations"]["inspection_cost_per_alert"])
+
+PROVENANCE_KEYS = frozenset({"evidence_ids", "evidence_id", "run_id"})
+
+
+def _substance(x: Any) -> Any:
+    """Outputs with provenance references removed: evidence ids embed the run id, so they
+    differ between a run and its replay by construction and are not part of the finding."""
+    if isinstance(x, dict):
+        return {k: _substance(v) for k, v in x.items() if k not in PROVENANCE_KEYS}
+    if isinstance(x, list):
+        return [_substance(v) for v in x]
+    return x
+
+
+def diff_evidence(a: dict[str, Evidence], b: dict[str, Evidence]) -> dict[str, Any]:
+    """Evidence-by-evidence comparison of two runs' outputs (ids are expected to differ)."""
+    names = sorted(set(a) | set(b))
+    rows = []
+    identical = True
+    for n in names:
+        if n not in a or n not in b:
+            rows.append(
+                {"name": n, "status": "missing_in_" + ("replay" if n not in b else "original")}
+            )
+            identical = False
+            continue
+        oa, ob = _substance(a[n].outputs), _substance(b[n].outputs)
+        same = oa == ob
+        paths = [] if same else _first_diffs(oa, ob)
+        if not same:
+            identical = False
+        rows.append({"name": n, "status": "identical" if same else "differs", "paths": paths})
+    return {"identical": identical, "records": rows}
+
+
+def _first_diffs(x: Any, y: Any, path: str = "", out: list | None = None, limit: int = 5) -> list:
+    out = [] if out is None else out
+    if len(out) >= limit:
+        return out
+    if isinstance(x, dict) and isinstance(y, dict):
+        for k in sorted(set(x) | set(y)):
+            _first_diffs(x.get(k), y.get(k), f"{path}.{k}" if path else str(k), out, limit)
+    elif isinstance(x, list) and isinstance(y, list):
+        if len(x) != len(y):
+            out.append({"path": path, "a": f"len {len(x)}", "b": f"len {len(y)}"})
+        for i, (p, q) in enumerate(zip(x, y, strict=False)):
+            _first_diffs(p, q, f"{path}[{i}]", out, limit)
+    elif x != y:
+        out.append({"path": path, "a": x, "b": y})
+    return out
+
+
+def _deep_merge(base: dict, over: dict) -> dict:
+    out = dict(base)
+    for k, v in over.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out

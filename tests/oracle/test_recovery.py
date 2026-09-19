@@ -79,8 +79,15 @@ def test_brake_ablation_structure_on_small(source, brake_spec):
     assert len(ab["sufficient_set"]) < len(usable)
     assert ab["sufficient_auc"]["point"] > ab["full_auc"]["point"] - 0.01
     assert ab["trace"][0]["removed"] is None and ab["trace"][0]["accepted"]
-    # the small fixture cannot resolve 0.0025 AUC: the tool must say so
+    # the small fixture cannot resolve 0.0025 AUC on the removals it accepts: the tool must say so
     assert ab["underpowered"] is True
+    # power is only a concern for accepted removals; a wide interval on a rejected removal
+    # (e.g. dropping the main sensor) is a clear decision, not a resolution problem
+    steps = ab["trace"][1:]
+    assert all(t["accepted"] for t in steps if t["underpowered"])
+    assert ab["resolution"] == max(t["resolution"] for t in steps if t["accepted"])
+    assert set(ab["kept_conservatively"]) <= set(ab["kept_as_needed"])
+    assert set(ab["kept_as_needed"]) <= set(ab["sufficient_set"])
 
 
 def test_cross_oem_reflects_sensor_gap(source, brake_spec):

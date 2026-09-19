@@ -36,6 +36,7 @@ class Matrix:
     groups: np.ndarray  # vehicle index (int)
     oem: np.ndarray  # str
     dates: np.ndarray  # datetime64[D]
+    days_to_event: np.ndarray  # float; days until the next target event (NaN if none)
     feature_names: list[str]
     signal_of: list[str]  # signal id for each feature column
     signals: list[str]
@@ -52,6 +53,7 @@ class Matrix:
             groups=self.groups,
             oem=self.oem,
             dates=self.dates,
+            days_to_event=self.days_to_event,
             feature_names=[self.feature_names[i] for i in keep],
             signal_of=[self.signal_of[i] for i in keep],
             signals=[s for s in self.signals if s in set(signals)],
@@ -138,6 +140,7 @@ def build_matrix(
     pos_frac = len(pos_idx) / max(n_pos_total, 1)
     w = np.where(y == 1, 1.0 / pos_frac, 1.0 / neg_frac)
     veh_codes = pd.factorize(df["vehicle_id"])[0]
+    days_to = _days_to_next_event(source, spec, df.iloc[idx][["vehicle_id", "date"]])
     return Matrix(
         X=X,
         y=y,
@@ -145,6 +148,7 @@ def build_matrix(
         groups=veh_codes[idx],
         oem=df["oem"].to_numpy()[idx],
         dates=df["date"].to_numpy().astype("datetime64[D]")[idx],
+        days_to_event=days_to,
         feature_names=feature_names,
         signal_of=signal_of,
         signals=sig_cols,
@@ -152,3 +156,28 @@ def build_matrix(
         n_pos_total=int(n_pos_total),
         n_neg_total=int(n_neg_total),
     )
+
+
+def _days_to_next_event(source: DataSource, spec: ProblemSpec, rows: pd.DataFrame) -> np.ndarray:
+    """Days from each sampled vehicle-day to that vehicle's next target event (NaN if none).
+    Used for event-level metrics: rows sharing (vehicle, next event) belong to one event."""
+    ev = source.events()
+    ev = ev[ev["event_type"] == spec.target_event][["vehicle_id", "date"]].rename(
+        columns={"date": "next_event"}
+    )
+    ev["next_event"] = pd.to_datetime(ev["next_event"])
+    ev = ev.sort_values("next_event")
+    left = rows.copy()
+    left["date"] = pd.to_datetime(left["date"])
+    left["_i"] = np.arange(len(left))
+    left = left.sort_values("date")
+    m = pd.merge_asof(
+        left,
+        ev,
+        left_on="date",
+        right_on="next_event",
+        by="vehicle_id",
+        direction="forward",
+        allow_exact_matches=False,
+    ).sort_values("_i")
+    return (m["next_event"] - m["date"]).dt.days.to_numpy(dtype=float)

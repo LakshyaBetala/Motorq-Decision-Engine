@@ -58,3 +58,12 @@ def test_ledger_read_paths(client):
     assert c.get("/runs/r1/evidence/ev_000000000000").status_code == 404
     assert c.get("/runs/nope").status_code == 404
     assert c.post("/runs/r1/ask", json={"question": "why?"}).status_code == 400
+
+
+def test_new_endpoints_validate(client):
+    c, _ = client
+    assert c.post("/runs/nope/whatif", json={}).status_code == 404
+    assert c.post("/runs/nope/replay").status_code == 404
+    assert c.get("/runs/nope/brief.md").status_code == 404
+    p = c.get("/portfolio").json()
+    assert p["n_capabilities"] == 0 and p["cogs"]["n_catalog"] >= 85

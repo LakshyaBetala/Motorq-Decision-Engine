@@ -41,6 +41,10 @@ class RunRow(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     llm_used: Mapped[int] = mapped_column(Integer, default=0)
     request_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    derived_from: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )  # what-if / replay parent
+    kind: Mapped[str] = mapped_column(String(16), default="study")  # study | whatif | replay
 
 
 class StepRow(Base):
@@ -60,6 +64,9 @@ class EvidenceRow(Base):
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.run_id"), index=True)
     step: Mapped[str] = mapped_column(String(64))
     tool: Mapped[str] = mapped_column(String(64))
+    name: Mapped[str] = mapped_column(
+        String(64), default=""
+    )  # logical name in the run (e.g. coverage_sufficient)
     inputs_json: Mapped[dict] = mapped_column(JSON)
     inputs_hash: Mapped[str] = mapped_column(String(64))
     dataset_hash: Mapped[str] = mapped_column(String(64))
@@ -93,7 +100,29 @@ def make_engine(url: str | None = None):
         Path(url.split("///", 1)[1]).parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(url, future=True)
     Base.metadata.create_all(engine)
+    _migrate(engine)
     return engine
+
+
+_ADDED_COLUMNS = {
+    "runs": {"derived_from": "VARCHAR(32)", "kind": "VARCHAR(16) DEFAULT 'study'"},
+    "evidence": {"name": "VARCHAR(64) DEFAULT ''"},
+}
+
+
+def _migrate(engine) -> None:
+    """Additive migrations: add columns introduced after the first release."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    with engine.begin() as conn:
+        for table, cols in _ADDED_COLUMNS.items():
+            if table not in insp.get_table_names():
+                continue
+            existing = {c["name"] for c in insp.get_columns(table)}
+            for col, ddl in cols.items():
+                if col not in existing:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}"))
 
 
 def memory_engine():
@@ -117,6 +146,8 @@ class Ledger:
         dataset_hash: str,
         llm_used: bool,
         request_text: str | None,
+        derived_from: str | None = None,
+        kind: str = "study",
     ) -> None:
         with Session(self.engine) as s:
             s.add(
@@ -128,6 +159,8 @@ class Ledger:
                     created_at=_now(),
                     llm_used=int(llm_used),
                     request_text=request_text,
+                    derived_from=derived_from,
+                    kind=kind,
                 )
             )
             s.commit()
@@ -177,6 +210,8 @@ class Ledger:
                 "error": row.error,
                 "llm_used": bool(row.llm_used),
                 "request_text": row.request_text,
+                "derived_from": row.derived_from,
+                "kind": row.kind,
                 "steps": [
                     {
                         "name": x.name,
@@ -192,6 +227,7 @@ class Ledger:
                         "evidence_id": e.evidence_id,
                         "step": e.step,
                         "tool": e.tool,
+                        "name": e.name,
                         "duration_ms": e.duration_ms,
                         "created_at": e.created_at,
                     }
@@ -211,6 +247,9 @@ class Ledger:
                     "decision": (r.verdict_json or {}).get("decision"),
                     "created_at": r.created_at,
                     "dataset_hash": r.dataset_hash,
+                    "kind": r.kind,
+                    "derived_from": r.derived_from,
+                    "horizon_days": r.spec_json.get("horizon_days"),
                 }
                 for r in rows
             ]
@@ -243,6 +282,7 @@ class Ledger:
         dataset_hash: str,
         seed: int,
         fn: Callable[[], dict[str, Any]],
+        name: str = "",
     ) -> Evidence:
         """Execute `fn`, store its rounded outputs as Evidence, return the Evidence."""
         ih = hash_inputs(
@@ -272,6 +312,7 @@ class Ledger:
                         run_id=run_id,
                         step=step,
                         tool=tool,
+                        name=name or tool,
                         inputs_json=ev.inputs,
                         inputs_hash=ih,
                         dataset_hash=dataset_hash,
@@ -294,6 +335,7 @@ class Ledger:
                 "run_id": e.run_id,
                 "step": e.step,
                 "tool": e.tool,
+                "name": e.name,
                 "inputs": e.inputs_json,
                 "inputs_hash": e.inputs_hash,
                 "dataset_hash": e.dataset_hash,
@@ -311,6 +353,24 @@ class Ledger:
                 .order_by(EvidenceRow.created_at)
             ).all()
             return [self.get_evidence(r.evidence_id) for r in rows]  # type: ignore[misc]
+
+    def evidence_objects(self, run_id: str) -> dict[str, Evidence]:
+        """Rebuild the runner's {name: Evidence} map for a finished run (what-if / replay)."""
+        out: dict[str, Evidence] = {}
+        for e in self.evidence_for_run(run_id):
+            out[e["name"] or e["tool"]] = Evidence(
+                evidence_id=e["evidence_id"],
+                run_id=e["run_id"],
+                step=e["step"],
+                tool=e["tool"],
+                inputs=e["inputs"],
+                inputs_hash=e["inputs_hash"],
+                dataset_hash=e["dataset_hash"],
+                seed=e["seed"],
+                outputs=e["outputs"],
+                created_at=datetime.fromisoformat(e["created_at"]),
+            )
+        return out
 
     # ------------------------------------------------------------------ messages
     def add_message(self, run_id: str, role: str, content: str, evidence_ids: list[str]) -> None:

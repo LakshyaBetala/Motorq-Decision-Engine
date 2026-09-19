@@ -10,7 +10,9 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+from motorq_de.agent.portfolio import portfolio as _portfolio
 from motorq_de.agent.runner import Runner, RunResult
+from motorq_de.agent.webhook import notify_run
 from motorq_de.data.source import DataSource
 from motorq_de.data.synthetic import SyntheticSource, dataset_dirs, latest_dataset
 from motorq_de.ledger.store import Ledger
@@ -18,29 +20,20 @@ from motorq_de.schemas import ProblemSpec
 
 DATA_ROOT = Path(os.environ.get("MDE_DATA_ROOT", "data/synthetic"))
 
-EXAMPLE_VALUES: dict[str, dict[str, Any]] = {
-    "brake_service_event": {
-        "value_bearing_fraction": {"low": 0.05, "base": 0.10, "high": 0.20},
-        "preventable_fraction": {"low": 0.3, "base": 0.4, "high": 0.5},
-        "usd_per_avoided_event": {"low": 1500, "base": 3500, "high": 6500},
-        "fleet_size": {"low": 5000, "base": 10000, "high": 20000},
-        "source_note": "downtime $448-760/day and $3.5k-6.5k/incident (oxmaint, fleetrabbit); predictive maintenance cuts unplanned downtime 30-50%",
-    },
-    "theft_event": {
-        "value_bearing_fraction": {"low": 0.6, "base": 0.8, "high": 1.0},
-        "preventable_fraction": {"low": 0.1, "base": 0.2, "high": 0.3},
-        "usd_per_avoided_event": {"low": 8000, "base": 15000, "high": 30000},
-        "fleet_size": {"low": 5000, "base": 10000, "high": 20000},
-        "source_note": "NICB 2024: 250/100k residents; ~85% recovered; loss per unrecovered/damaged vehicle is a human estimate",
-    },
-    "battery_degradation_event": {
-        "value_bearing_fraction": {"low": 0.3, "base": 0.5, "high": 0.8},
-        "preventable_fraction": {"low": 0.2, "base": 0.3, "high": 0.5},
-        "usd_per_avoided_event": {"low": 2000, "base": 5000, "high": 12000},
-        "fleet_size": {"low": 500, "base": 1000, "high": 3000},
-        "source_note": "Geotab 2026 degradation rates; $/event is a human estimate of an unplanned EV service",
-    },
-}
+
+def _load_value_assumptions() -> dict[str, dict[str, Any]]:
+    import yaml
+
+    from motorq_de.economics.cost import HERE as ECON
+
+    raw = yaml.safe_load((ECON / "value_assumptions.yaml").read_text(encoding="utf-8"))
+    out = {}
+    for target, body in raw["targets"].items():
+        out[target] = {k: v for k, v in body.items() if k != "owner"}
+    return out
+
+
+EXAMPLE_VALUES: dict[str, dict[str, Any]] = _load_value_assumptions()
 
 EXAMPLE_SPECS: dict[str, dict[str, Any]] = {
     "brake": {
@@ -136,9 +129,30 @@ class Service:
             from motorq_de.agent.llm import narrative as _narr
 
             narrative = _narr
-        return self.runner(progress).run(
+        res = self.runner(progress).run(
             spec, request_text=request_text, llm_used=narrative is not None, narrative=narrative
         )
+        notify_run(res, self.source.dataset_hash)
+        return res
+
+    def whatif(
+        self,
+        run_id: str,
+        value: dict[str, Any] | None = None,
+        price_overrides: dict[str, Any] | None = None,
+        constraints: dict[str, Any] | None = None,
+    ) -> RunResult:
+        from motorq_de.schemas import ValueAssumptions
+
+        v = ValueAssumptions.model_validate(value) if value else None
+        return self.runner().whatif(run_id, v, price_overrides, constraints)
+
+    def replay(self, run_id: str, progress=None) -> RunResult:
+        return self.runner(progress).replay(run_id)
+
+    def portfolio(self) -> dict[str, Any]:
+        catalog = [m.model_dump() for m in self.source.list_signals()]
+        return _portfolio(self.ledger, catalog)
 
     def submit(
         self, spec: ProblemSpec, request_text: str | None = None, use_llm: bool = False

@@ -234,3 +234,22 @@ tests reflect the revised design; the sections above are kept as the original co
 | Data layer (§5) | SyntheticSource; SnowflakeSource stub | `FrameSource` base shared by `SyntheticSource` and a working `SnowflakeSource` (configurable tables, inferred coverage, deterministic VIN sampling, grid completion), tested with a production-shaped fake | The seam had to be real code, not a docstring |
 | Layout (§2) | `api/` top-level | `motorq_de/api.py` inside the package; `agent/service.py` facade | `mde serve` works from any directory |
 | Dependencies | pandas unpinned | `pandas>=2.2,<3` | Snowflake connector supports pandas 2.x |
+
+## 18. Strengthening round (2026-09-19, later)
+
+| Area | Change | Why |
+|---|---|---|
+| Metrics | Event-level metrics (events caught, median lead days, false-alert episodes per 100 vehicle-months) computed from vehicle-day scores keyed on (vehicle, event date); an alert-rate grid of 10 points | Vehicle-day recall is not what a fleet manager experiences; the old false-alert proxy over-counted several-fold |
+| Economics | ROI uses event recall and the false-alert rate directly; `alert_burden` flag; `value_assumptions.yaml` owned by product | Human inputs belong in a reviewed file, not code |
+| Ablation | Cost-aware order (importance per marginal dollar); daily-cadence ablation variant; a rejected signal is kept and elimination continues | Finds the cheapest non-inferior set; exposes the polling-cadence lever; cheap noise cannot hide behind a necessary expensive signal |
+| Cross-OEM | Within-OEM benchmark and a `diagnosis` per OEM (`oem_lacks_signal` / `does_not_transfer` / `ok`) | Separates missing signal from model transfer failure |
+| Policy | `policy.yaml` v1.1, thresholds loaded at import; `alert_burden` flag | Threshold changes are reviewed config, stamped in the brief |
+| Ledger | `evidence.name`, `runs.kind` / `derived_from`, additive migration; `evidence_objects()` | What-if and replay reconstruct the runner's evidence map |
+| Runner | `whatif()` (ECONOMICS -> POLICY -> REPORT on a parent's harness evidence, seconds); `replay()` with evidence-by-evidence diff; stages as methods | The roadmap review argues about assumptions, not experiments |
+| Portfolio | `agent/portfolio.py`: latest study per capability, sorted; COGS report of signals and cadences no viable capability needs | The promised second half of the pitch |
+| API / CLI | `/runs/{id}/whatif`, `/replay`, `/brief.md`, `/events` (SSE), `/portfolio`; `mde run replay|whatif`, `mde portfolio` | |
+| Web | Live progress via SSE through a runtime proxy route; portfolio page; coverage heatmap; ablation table; operating-point curve; what-if panel; export; replay | |
+| Integration | Slack-compatible webhook on run completion; Bedrock provider switch; SQL templates for `SIGNAL_CATALOG`, `SIGNALS_DAILY` (dynamic table), `VEHICLES`, `EVENTS`; `docs/DEPLOY.md` (Access/IAP, compose, owned inputs, scheduled portfolio job); privacy test | |
+| Performance | Cluster bootstrap re-implemented as sort-once + multinomial vehicle weights (`AucSorter`), exact to 1e-9 vs explicit resampling; quality reads batched 16 signals per parquet read | 300 replicates on 150k rows: ~30 s -> 1.4 s; a 12-signal ablation on the 5k-vehicle dataset: ~45 min -> 3.5 min |
+| Performance (folds) | Cross-validation folds run in parallel worker processes (`run_folds`), threads x workers bounded by `MDE_CPUS`; LightGBM deterministic mode verified bit-identical across thread counts | Continue-past-rejection ablation does ~5x more fits than stop-at-first-rejection; on 16 cores OOF predictions drop 11.2 s -> 4.8 s per 5-fold set with identical output |
+| `underpowered` semantics | Any step whose bootstrap half-width exceeded tolerance/2 | Only an **accepted** removal can be underpowered; a wide interval on a rejected removal (dropping the main sensor) is a clear decision. Rejections whose interval still reaches the non-inferior region are listed as `kept_conservatively` | Testing every candidate surfaced the flaw: removing `brake_pad_wear_pct` tripped the flag on a step that was never in doubt |

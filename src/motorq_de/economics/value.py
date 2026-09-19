@@ -3,10 +3,9 @@
 The value chain, per year:
 
     events           = fleet_size x event_rate             (event_rate MEASURED from data, with CI)
-    detected         = events x recall                     (recall from the harness, with CI)
+    detected         = events x event_recall               (event-level recall from the harness)
     avoided_value    = detected x value_bearing_fraction x preventable_fraction x usd_per_avoided_event
-    distinct_alerts  = fleet_size x 365 x alert_rate / horizon_days
-    false_alerts     = max(distinct_alerts - detected, 0)
+    false_alerts     = fleet_size x 12 x false_alerts_per_100_vehicle_months / 100
     false_alert_cost = false_alerts x inspection_cost
     net              = avoided_value - false_alert_cost - run_cost - build_amortized
     roi              = net / (run_cost + build_amortized)
@@ -47,6 +46,7 @@ def _terms(
     build_amortized_month: float,
     n: int,
     seed: int,
+    false_alerts_per_100vm: float | None = None,
 ) -> dict[str, np.ndarray]:
     rng = np.random.default_rng(seed)
     fleet = pert(rng, value.fleet_size, n)
@@ -59,8 +59,11 @@ def _terms(
     events = fleet * epy
     detected = events * rec
     avoided = detected * vbf * prev * usd
-    distinct_alerts = fleet * 365 * alert_rate / max(horizon_days, 1)
-    false_alerts = np.clip(distinct_alerts - detected, 0, None)
+    if false_alerts_per_100vm is not None and np.isfinite(false_alerts_per_100vm):
+        false_alerts = fleet * 12.0 * false_alerts_per_100vm / 100.0
+    else:  # fallback when event-level metrics are unavailable: alert episodes minus catches
+        distinct_alerts = fleet * 365 * alert_rate / max(horizon_days, 1)
+        false_alerts = np.clip(distinct_alerts - detected, 0, None)
     false_cost = false_alerts * insp
     # run cost scales with fleet relative to the fleet the cost model was priced at (base)
     scale = fleet / max(value.fleet_size.base, 1)
@@ -90,6 +93,7 @@ def roi_distribution(
     build_amortized_month: float,
     seed: int = 42,
     n: int = N_DRAWS,
+    false_alerts_per_100vm: float | None = None,
 ) -> dict[str, Any]:
     t = _terms(
         value,
@@ -102,6 +106,7 @@ def roi_distribution(
         build_amortized_month,
         n,
         seed,
+        false_alerts_per_100vm,
     )
     roi = t["roi"][np.isfinite(t["roi"])]
     pct = lambda x, q: float(np.percentile(x, q))  # noqa: E731
@@ -111,6 +116,7 @@ def roi_distribution(
             "event_rate": event_rate.model_dump(),
             "recall": recall.model_dump(),
             "alert_rate": alert_rate,
+            "false_alerts_per_100_vehicle_months": false_alerts_per_100vm,
             "horizon_days": horizon_days,
             "run_cost_month": run_cost_month,
             "build_amortized_month": build_amortized_month,
@@ -150,6 +156,7 @@ def tornado(
     run_cost_month: float,
     build_amortized_month: float,
     seed: int = 42,
+    false_alerts_per_100vm: float | None = None,
 ) -> dict[str, Any]:
     """One-at-a-time sensitivity of median ROI: swing each input to its low / high while
     holding the others at base. Ranked by swing width."""
@@ -178,6 +185,7 @@ def tornado(
             kw["build_amortized_month"],
             2000,
             seed,
+            false_alerts_per_100vm,
         )
         r = t["roi"][np.isfinite(t["roi"])]
         return float(np.median(r)) if len(r) else float("nan")
@@ -235,13 +243,17 @@ def choose_operating_point(
     seed: int = 42,
 ) -> dict[str, Any]:
     """Pick the alert rate that maximises median net value. The operating point is an
-    economic decision (alert cost vs. avoided cost), not a modelling default."""
+    economic decision (alert cost vs. avoided cost), not a modelling default. Uses event-level
+    recall and false-alert rate when the harness provides them."""
     rows = []
     for op in operating_points:
+        r = op.get("event_recall")
+        r = op["recall"] if r is None else r
+        fa = op.get("false_alerts_per_100_vehicle_months")
         rec = Range(
-            low=max(0.0, op["recall"] - recall_ci_halfwidth),
-            base=op["recall"],
-            high=min(1.0, op["recall"] + recall_ci_halfwidth),
+            low=max(0.0, r - recall_ci_halfwidth),
+            base=r,
+            high=min(1.0, r + recall_ci_halfwidth),
         )
         t = _terms(
             value,
@@ -254,12 +266,16 @@ def choose_operating_point(
             build_amortized_month,
             3000,
             seed,
+            fa,
         )
         rows.append(
             {
                 "alert_rate": op["alert_rate"],
-                "recall": op["recall"],
+                "recall": r,
+                "recall_basis": "event" if op.get("event_recall") is not None else "vehicle_day",
                 "precision": op.get("precision"),
+                "median_lead_days": op.get("median_lead_days"),
+                "false_alerts_per_100_vehicle_months": fa,
                 "median_net_value_year": float(np.median(t["net_value"])),
                 "median_false_alert_cost_year": float(np.median(t["false_alert_cost"])),
             }

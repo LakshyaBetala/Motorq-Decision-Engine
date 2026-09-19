@@ -175,3 +175,91 @@ def serve(host: str = "127.0.0.1", port: int = 8000):
     import uvicorn
 
     uvicorn.run("motorq_de.api:app", host=host, port=port, reload=False)
+
+
+@run_app.command("replay")
+def run_replay(run_id: str, dataset: Path | None = typer.Option(None)):
+    """Re-run a study from its stored spec and diff every evidence record."""
+    from motorq_de.agent.service import Service
+
+    svc = Service(dataset=dataset)
+    res = svc.replay(run_id, progress=lambda m: rprint(f"  [dim]{m}[/]"))
+    d = res.diff or {}
+    rprint(
+        f"\n[bold]{'IDENTICAL' if d.get('identical') else 'DIFFERS'}[/]  replay {res.run_id} of {run_id}"
+    )
+    t = Table(title="evidence diff")
+    t.add_column("name"), t.add_column("status"), t.add_column("first differences")
+    for r in d.get("records", []):
+        t.add_row(r["name"], r["status"], json.dumps(r.get("paths", []))[:120])
+    rprint(t)
+    raise typer.Exit(0 if d.get("identical") else 1)
+
+
+@run_app.command("whatif")
+def run_whatif(
+    run_id: str,
+    value_json: str = typer.Option(None, help="ValueAssumptions JSON"),
+    prices_json: str = typer.Option(None, help="price sheet overrides JSON"),
+    out: Path | None = typer.Option(None),
+):
+    """Re-run economics + policy on a finished study with new human inputs (seconds)."""
+    from motorq_de.agent.service import Service
+
+    svc = Service()
+    res = svc.whatif(
+        run_id,
+        json.loads(value_json) if value_json else None,
+        json.loads(prices_json) if prices_json else None,
+    )
+    rprint(f"[bold green]{res.verdict.decision}[/]  what-if {res.run_id} of {run_id}")
+    if out:
+        out.write_text(res.brief_md, encoding="utf-8")
+    else:
+        print(res.brief_md)
+
+
+@app.command("portfolio")
+def portfolio_cmd(json_out: bool = typer.Option(False, "--json")):
+    """All capabilities side by side, plus the signals no viable capability needs."""
+    from motorq_de.agent.service import Service
+
+    p = Service().portfolio()
+    if json_out:
+        print(json.dumps(p, indent=2, default=str))
+        return
+    t = Table(title="capabilities (latest study each)")
+    for c in (
+        "capability",
+        "target",
+        "decision",
+        "P(ROI>0)",
+        "net p50/yr",
+        "coverage",
+        "signals",
+        "cost/mo",
+        "dominant input",
+    ):
+        t.add_column(c)
+    for r in p["capabilities"]:
+        t.add_row(
+            r["capability_name"],
+            str(r["target_event"]),
+            str(r["decision"]),
+            "-" if r["p_roi_positive"] is None else f"{r['p_roi_positive']:.2f}",
+            "-" if r["net_value_p50"] is None else f"${r['net_value_p50']:,.0f}",
+            "-" if r["coverage"] is None else f"{r['coverage']:.2f}",
+            str(r["n_sufficient_signals"]),
+            "-"
+            if r["run_cost_marginal_month"] is None
+            else f"${r['run_cost_marginal_month']:,.0f}",
+            str(r["dominant_input"]),
+        )
+    rprint(t)
+    c = p["cogs"]
+    if c:
+        rprint(
+            f"[bold]COGS[/] {c['n_required_by_viable_capabilities']} of {c['n_catalog']} catalog signals are required by a viable capability; {len(c['unused_signals'])} are not. {c['cadence_lever']}."
+        )
+        for cat, sigs in c["unused_by_category"].items():
+            rprint(f"  [dim]{cat}[/]: {', '.join(sigs)}")

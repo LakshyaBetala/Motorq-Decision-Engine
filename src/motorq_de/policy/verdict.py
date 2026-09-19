@@ -12,30 +12,29 @@
       roi_spans_negative      5th percentile ROI < 0
       value_unvalidated       value assumptions not validated by a pilot
       short_history           a sufficient-set signal has < min_signal_history_months of data
-      ablation_underpowered   the data could not resolve tolerance/2 in ablation
+      ablation_underpowered   an accepted removal rests on a bootstrap that cannot resolve tolerance/2
       suspicious_signals      quality flagged a sufficient-set signal as 'confirm availability'
       cost_placeholders       run cost rests on placeholder unit prices (always true until
                               Motorq's contracted rates replace the price sheet)
+      alert_burden            false-alert episodes per 100 vehicle-months above the ceiling
+
+Thresholds live in policy.yaml (versioned); the brief stamps the version.
 
 The LLM never touches this. It can only add evidence.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 from motorq_de.schemas import FlagResult, GateResult, ProblemSpec, Verdict
 
-POLICY_VERSION = "1.0"
-
-THRESHOLDS = {
-    "model_lift_ci_lo": 0.0,
-    "p_roi_positive": 0.5,
-    "cross_oem_std": 0.03,
-    "cross_oem_min_gap": 0.05,
-    "temporal_degradation_upper": 0.03,
-    "roi_p5": 0.0,
-}
+_POLICY = yaml.safe_load((Path(__file__).parent / "policy.yaml").read_text(encoding="utf-8"))
+POLICY_VERSION = str(_POLICY["version"])
+THRESHOLDS: dict[str, float] = {**_POLICY["gates"], **_POLICY["flags"]}
 
 
 class EvidenceBundle:
@@ -201,7 +200,7 @@ def decide(spec: ProblemSpec, ev: EvidenceBundle) -> Verdict:
                 value=ab.get("resolution"),
                 threshold=ab.get("tolerance", 0.005) / 2,
                 evidence_ids=ab_ids,
-                note="bootstrap cannot resolve tolerance/2; more positives needed"
+                note="an accepted removal could not be resolved to tolerance/2; more positives needed"
                 if ab.get("underpowered")
                 else "",
             )
@@ -219,6 +218,20 @@ def decide(spec: ProblemSpec, ev: EvidenceBundle) -> Verdict:
                 evidence_ids=lk_ids,
                 note=", ".join(susp)
                 + (" - confirm availability at prediction time" if susp else ""),
+            )
+        )
+
+    op, op_ids = ev.get("operating_point")
+    if op and op.get("chosen", {}).get("false_alerts_per_100_vehicle_months") is not None:
+        fa = op["chosen"]["false_alerts_per_100_vehicle_months"]
+        flags.append(
+            FlagResult(
+                name="alert_burden",
+                tripped=bool(fa > THRESHOLDS["false_alerts_per_100_vehicle_months_max"]),
+                value=fa,
+                threshold=THRESHOLDS["false_alerts_per_100_vehicle_months_max"],
+                evidence_ids=op_ids,
+                note="false-alert episodes per 100 vehicle-months at the chosen operating point",
             )
         )
 

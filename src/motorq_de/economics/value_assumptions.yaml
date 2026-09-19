@@ -1,0 +1,26 @@
+# Default value assumptions per target, used when a request supplies none. These are HUMAN
+# inputs: the engine never derives them from data. Each block has an owner and a review date.
+# Replace with figures from the $-impact models Fuse Action Hub already uses.
+as_of: "2026-09-19"
+targets:
+  brake_service_event:
+    owner: product
+    value_bearing_fraction: {low: 0.05, base: 0.10, high: 0.20}   # share of services that would have been unplanned downtime
+    preventable_fraction: {low: 0.3, base: 0.4, high: 0.5}
+    usd_per_avoided_event: {low: 1500, base: 3500, high: 6500}
+    fleet_size: {low: 5000, base: 10000, high: 20000}
+    source_note: "downtime $448-760/day and $3.5k-6.5k/incident (oxmaint, fleetrabbit); predictive maintenance cuts unplanned downtime 30-50%"
+  theft_event:
+    owner: product
+    value_bearing_fraction: {low: 0.6, base: 0.8, high: 1.0}
+    preventable_fraction: {low: 0.1, base: 0.2, high: 0.3}
+    usd_per_avoided_event: {low: 8000, base: 15000, high: 30000}
+    fleet_size: {low: 5000, base: 10000, high: 20000}
+    source_note: "NICB 2024: 250/100k residents; ~85% recovered; loss per unrecovered/damaged vehicle is a human estimate"
+  battery_degradation_event:
+    owner: product
+    value_bearing_fraction: {low: 0.3, base: 0.5, high: 0.8}
+    preventable_fraction: {low: 0.2, base: 0.3, high: 0.5}
+    usd_per_avoided_event: {low: 2000, base: 5000, high: 12000}
+    fleet_size: {low: 500, base: 1000, high: 3000}
+    source_note: "Geotab 2026 degradation rates; $/event is a human estimate of an unplanned EV service"

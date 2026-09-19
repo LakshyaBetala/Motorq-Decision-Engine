@@ -24,11 +24,8 @@ class Line(Frozen):
     def __init__(
         self, text: str = "", evidence_ids: tuple[str, ...] = (), **kw: Any
     ) -> None:  # positional-friendly
-        super().__init__(
-            text=kw.pop("text", text),
-            evidence_ids=tuple(kw.pop("evidence_ids", evidence_ids)),
-            **kw,
-        )
+        ids = tuple(dict.fromkeys(kw.pop("evidence_ids", evidence_ids)))  # dedupe, keep order
+        super().__init__(text=kw.pop("text", text), evidence_ids=ids, **kw)
 
 
 class Section(Frozen):
@@ -234,6 +231,13 @@ def build_brief(
                     I("ablation"),
                 )
             )
+        if ab.get("kept_conservatively"):
+            lines.append(
+                Line(
+                    f"Kept conservatively (drop not proven below tolerance, not proven above it): {', '.join(ab['kept_conservatively'])}",
+                    I("ablation"),
+                )
+            )
     if cmp:
         for name, entry in cmp["sets"].items():
             lg = entry["models"]["lightgbm"]
@@ -247,6 +251,24 @@ def build_brief(
                     I("model_comparison"),
                 )
             )
+        abd = E("ablation_daily_cadence")
+        if abd and "daily_cadence" in cmp["sets"]:
+            dc = cmp["sets"]["daily_cadence"]["models"]["lightgbm"]
+            same = set(abd["sufficient_set"]) == set(ab["sufficient_set"]) if ab else False
+            if same:
+                lines.append(
+                    Line(
+                        "Cadence: the cost-aware sufficient set already needs no realtime polling - daily/weekly signals only",
+                        I("ablation_daily_cadence") + I("ablation"),
+                    )
+                )
+            else:
+                lines.append(
+                    Line(
+                        f"Cadence ablation - daily/weekly signals only ({len(abd['sufficient_set'])} signals, no realtime polling): AUC {_ci(dc['auc'])} vs sufficient-set AUC {_ci(cmp['sets']['sufficient']['models']['lightgbm']['auc'])}; set: {', '.join(abd['sufficient_set'])}",
+                        I("ablation_daily_cadence") + I("model_comparison"),
+                    )
+                )
         if cmp.get("paired"):
             p = cmp["paired"]
             lines.append(
@@ -286,6 +308,18 @@ def build_brief(
                 I("cross_oem"),
             )
         )
+        diag = {o: v.get("diagnosis") for o, v in per.items() if v.get("diagnosis")}
+        if diag:
+            lines.append(
+                Line(
+                    "Within-OEM benchmark (train and test on the OEM alone) vs held-out: "
+                    + "; ".join(
+                        f"{o} within {_ci(per[o]['within_oem_auc'])} / held-out {per[o]['auc']['point']:.3f} -> {d.replace('_', ' ')}"
+                        for o, d in sorted(diag.items())
+                    ),
+                    I("cross_oem"),
+                )
+            )
         lines.append(
             Line(
                 "Per OEM: "
@@ -339,10 +373,25 @@ def build_brief(
             )
     if op:
         ch = op["chosen"]
+        basis = ch.get("recall_basis", "vehicle_day")
+        ev_bits = ""
+        if basis == "event":
+            ev_bits = (
+                f"; event-level: {ch['recall']:.3f} of events caught, median lead {_fmt(ch.get('median_lead_days'), 1)} days, "
+                f"{_fmt(ch.get('false_alerts_per_100_vehicle_months'), 1)} false-alert episodes per 100 vehicle-months"
+            )
         lines.append(
             Line(
-                f"Operating point chosen to maximise median net value: alert on top {ch['alert_rate']:.1%} of vehicle-days -> recall {ch['recall']:.3f}, precision {_fmt(ch.get('precision'))}; median false-alert cost {_usd(ch['median_false_alert_cost_year'])}/yr",
+                f"Operating point chosen to maximise median net value: alert on top {ch['alert_rate']:.2%} of vehicle-days -> precision {_fmt(ch.get('precision'))}{ev_bits}; median false-alert cost {_usd(ch['median_false_alert_cost_year'])}/yr",
                 I("operating_point"),
+            )
+        )
+    cd = E("cost_daily_cadence")
+    if cd and cs and cd["monthly"]["marginal_total"] != cs["monthly"]["marginal_total"]:
+        lines.append(
+            Line(
+                f"Daily-cadence-only set run cost: marginal {_usd(cd['monthly']['marginal_total'])}/mo vs {_usd(cs['monthly']['marginal_total'])}/mo for the sufficient set; OEM API calls {_usd(cd['monthly']['oem_api_calls'])}/mo vs {_usd(cs['monthly']['oem_api_calls'])}/mo",
+                I("cost_daily_cadence") + I("cost_sufficient"),
             )
         )
     if roi:

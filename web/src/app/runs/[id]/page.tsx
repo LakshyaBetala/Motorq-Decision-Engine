@@ -4,6 +4,8 @@ import { useParams } from "next/navigation";
 import { api, Brief, Evidence, RunDetail } from "@/lib/api";
 import { DecisionBadge } from "@/components/Decision";
 import { AblationTrace, CrossOem, Importance, Tornado } from "@/components/Charts";
+import { AblationTable, CoverageHeatmap, OperatingCurve, WhatIf } from "@/components/Panels";
+import Link from "next/link";
 
 function Cite({ ids, onOpen }: { ids: string[]; onOpen: (id: string) => void }) {
   if (!ids?.length) return null;
@@ -44,6 +46,7 @@ export default function RunPage() {
 
   useEffect(() => {
     let alive = true;
+    let es: EventSource | null = null;
     const load = async () => {
       const r = await api.run(id);
       if (!alive) return;
@@ -59,16 +62,37 @@ export default function RunPage() {
     };
     load().catch(console.error);
     api.health().then((h) => setLlm(h.llm_available)).catch(() => {});
-    const t = setInterval(() => { if (!run || run.status === "running") load().catch(() => {}); }, 4000);
-    return () => { alive = false; clearInterval(t); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, run?.status]);
+    // live step progress until the run finishes (server-sent events through the proxy)
+    try {
+      es = new EventSource(`/api/runs/${id}/events`);
+      es.onmessage = (m) => {
+        const d = JSON.parse(m.data);
+        setRun((prev) => (prev ? { ...prev, status: d.status, steps: d.steps } : prev));
+        if (d.status === "done" || d.status === "failed") { es?.close(); load().catch(console.error); }
+      };
+      es.onerror = () => es?.close();
+    } catch { /* EventSource unavailable: the initial load still renders finished runs */ }
+    return () => { alive = false; es?.close(); };
+  }, [id]);
 
   const byTool = useMemo(() => {
     const m: Record<string, Evidence> = {};
     for (const e of Object.values(evidence)) m[`${e.step}:${e.tool}`] = e;
     const pick = (tool: string) => Object.values(evidence).find((e) => e.tool === tool);
-    return { fa: pick("feature_analysis"), ab: pick("ablation"), xo: pick("cross_oem_validation"), tor: pick("tornado"), roi: pick("roi_distribution") };
+    const byName = (name: string) => Object.values(evidence).find((e) => (e as any).name === name);
+    return {
+      fa: pick("feature_analysis"),
+      ab: byName("ablation") ?? pick("ablation"),
+      abd: byName("ablation_daily_cadence"),
+      xo: pick("cross_oem_validation"),
+      tor: pick("tornado"),
+      roi: pick("roi_distribution"),
+      cov: byName("coverage_sufficient"),
+      op: pick("choose_operating_point"),
+      cmp: pick("model_comparison"),
+      cd: byName("cost_daily_cadence"),
+      cs: byName("cost_sufficient"),
+    };
   }, [evidence]);
 
   async function ask() {
@@ -90,8 +114,17 @@ export default function RunPage() {
           <h1 className="text-xl font-semibold tracking-tight">{String(run.spec.capability_name)}</h1>
           <p className="mono text-ink-500">target {String(run.spec.target_event)} · horizon {String(run.spec.horizon_days)}d · run {run.run_id} · dataset {run.dataset_hash} · {run.llm_used ? "LLM narrative" : "headless"}</p>
         </div>
-        <DecisionBadge decision={v?.decision ?? null} size="lg" />
+        <div className="flex items-center gap-2">
+          {run.status === "done" && (
+            <>
+              <a className="rounded border border-ink-300 px-2 py-1 text-xs text-ink-700 hover:bg-ink-100" href={`/api/runs/${id}/brief.md`} target="_blank" rel="noreferrer">Export .md</a>
+              <button className="rounded border border-ink-300 px-2 py-1 text-xs text-ink-700 hover:bg-ink-100" onClick={async () => { const r = await api.replay(id); alert(`Replay queued (ticket ${r.ticket}). It appears in the runs list as kind=replay with an evidence-by-evidence diff in its messages.`); }}>Replay</button>
+            </>
+          )}
+          <DecisionBadge decision={v?.decision ?? null} size="lg" />
+        </div>
       </div>
+      {run.derived_from && <p className="text-xs text-ink-500">{run.kind} of <Link className="underline" href={`/runs/${run.derived_from}`}>{run.derived_from}</Link> — harness evidence is the parent's; economics and verdict recomputed.</p>}
 
       {/* timeline */}
       <div className="card p-4">
@@ -138,6 +171,28 @@ export default function RunPage() {
           {byTool.ab && <div className="card p-4"><h2 className="mb-1 text-sm font-semibold">Ablation trace <span className="font-normal text-ink-500">AUC as signals are removed</span><Cite ids={[byTool.ab.evidence_id]} onOpen={setOpen} /></h2><AblationTrace trace={byTool.ab.outputs.trace} /><p className="mt-1 text-xs text-ink-500">Sufficient set: {byTool.ab.outputs.sufficient_set.join(", ")}{byTool.ab.outputs.underpowered ? " · underpowered" : ""}</p></div>}
           {byTool.xo && <div className="card p-4"><h2 className="mb-1 text-sm font-semibold">Leave-one-OEM-out <span className="font-normal text-ink-500">AUC on the held-out OEM</span><Cite ids={[byTool.xo.evidence_id]} onOpen={setOpen} /></h2><CrossOem per_oem={byTool.xo.outputs.per_oem} mean={byTool.xo.outputs.mean_auc} /></div>}
           {byTool.tor && <div className="card p-4"><h2 className="mb-1 text-sm font-semibold">Sensitivity <span className="font-normal text-ink-500">median ROI, input low → high</span><Cite ids={[byTool.tor.evidence_id]} onOpen={setOpen} /></h2><Tornado ranked={byTool.tor.outputs.ranked} base={byTool.tor.outputs.base_median_roi} />{byTool.roi && <p className="mt-1 text-xs text-ink-500">P(ROI &gt; 0) = {byTool.roi.outputs.p_roi_positive?.toFixed(2)} · ROI p5 {byTool.roi.outputs.roi.p5.toFixed(2)} · p50 {byTool.roi.outputs.roi.p50.toFixed(2)} · p95 {byTool.roi.outputs.roi.p95.toFixed(2)}</p>}</div>}
+        </div>
+      )}
+
+      {(byTool.cov || byTool.op || byTool.ab) && (
+        <div className="grid gap-4 md:grid-cols-2">
+          {byTool.cov && <div className="card p-4"><h2 className="mb-2 text-sm font-semibold">OEM coverage of the sufficient set <Cite ids={[byTool.cov.evidence_id]} onOpen={setOpen} /></h2><CoverageHeatmap cov={byTool.cov.outputs} /></div>}
+          {byTool.op && byTool.cmp && (
+            <div className="card p-4">
+              <h2 className="mb-1 text-sm font-semibold">Operating point <span className="font-normal text-ink-500">events caught vs alert burden</span><Cite ids={[byTool.op.evidence_id]} onOpen={setOpen} /></h2>
+              <OperatingCurve points={byTool.cmp.outputs.sets.sufficient.models.lightgbm.operating_points} chosen={byTool.op.outputs.chosen} />
+              <p className="mt-1 text-xs text-ink-500">Chosen: alert top {(byTool.op.outputs.chosen.alert_rate * 100).toFixed(2)}% → {(byTool.op.outputs.chosen.recall * 100).toFixed(0)}% of events caught{byTool.op.outputs.chosen.median_lead_days != null ? `, median lead ${byTool.op.outputs.chosen.median_lead_days.toFixed(1)} d` : ""}{byTool.op.outputs.chosen.false_alerts_per_100_vehicle_months != null ? `, ${byTool.op.outputs.chosen.false_alerts_per_100_vehicle_months.toFixed(1)} false alerts / 100 vehicle-months` : ""}.</p>
+            </div>
+          )}
+          {byTool.ab && <div className="card p-4 md:col-span-2"><h2 className="mb-2 text-sm font-semibold">Ablation steps <Cite ids={[byTool.ab.evidence_id]} onOpen={setOpen} /></h2><AblationTable ab={byTool.ab.outputs} />{byTool.abd && byTool.cd && byTool.cs && <p className="mt-2 text-xs text-ink-700">Daily-cadence-only alternative: {byTool.abd.outputs.sufficient_set.length} signals, AUC {byTool.abd.outputs.sufficient_auc.point.toFixed(3)} vs {byTool.ab.outputs.sufficient_auc.point.toFixed(3)}; marginal cost ${Math.round(byTool.cd.outputs.monthly.marginal_total).toLocaleString()}/mo vs ${Math.round(byTool.cs.outputs.monthly.marginal_total).toLocaleString()}/mo <Cite ids={[byTool.abd.evidence_id, byTool.cd.evidence_id]} onOpen={setOpen} /></p>}</div>}
+        </div>
+      )}
+
+      {run.status === "done" && run.spec && (run.spec as any).value && (
+        <div className="card p-4">
+          <h2 className="mb-1 text-sm font-semibold">What if the value assumptions were different?</h2>
+          <p className="mb-3 text-xs text-ink-500">These are the human inputs. Change them and recompute the economics and verdict without re-running the experiments.</p>
+          <WhatIf runId={id} value={(run.spec as any).value} onDone={(rid) => { window.location.href = `/runs/${rid}`; }} />
         </div>
       )}
 

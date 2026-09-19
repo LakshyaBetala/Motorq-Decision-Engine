@@ -77,19 +77,23 @@ A deterministic pipeline with an optional LLM front end.
    |                     |   detector (dropped / confirm-availability)
    +---------+----------+
              v
-   +--------------------+   signal-level permutation importance w/ CIs . two-stage
-   |  Experiment harness |   ablation (screen, then ordered elimination with paired
-   |                     |   cluster-bootstrap non-inferiority) . forward temporal
-   |                     |   split . leave-one-OEM-out . fair one-signal baseline
+   +--------------------+   signal-level permutation importance w/ CIs . cost-aware
+   |  Experiment harness |   ablation (importance per dollar, paired cluster-bootstrap
+   |                     |   non-inferiority) . daily-cadence ablation . forward
+   |                     |   temporal split . leave-one-OEM-out with within-OEM
+   |                     |   benchmark . fair one-signal baseline . EVENT-LEVEL
+   |                     |   metrics: events caught, lead time, false alerts/100 veh-mo
    +---------+----------+
              v
    +--------------------+   sourced price sheet x volumes -> marginal & attributed
-   |  Economics          |   run cost . PERT Monte Carlo ROI . net-value-optimal
-   |                     |   alert operating point . tornado sensitivity
+   |  Economics          |   run cost . PERT Monte Carlo ROI on event-level recall and
+   |                     |   false-alert burden . net-value-optimal operating point .
+   |                     |   tornado sensitivity
    +---------+----------+
              v
-   +--------------------+   pure function of evidence: 4 hard gates + 8 uncertainty
-   |  Decision policy    |   flags -> BUILD_READY / PILOT / NOT_FEASIBLE
+   +--------------------+   pure function of evidence: 4 hard gates + 9 uncertainty
+   |  Decision policy    |   flags (policy.yaml, versioned) -> BUILD_READY / PILOT /
+   |                     |   NOT_FEASIBLE
    +---------+----------+
              v
    +--------------------+   every numeric line cites an evidence_id
@@ -143,7 +147,7 @@ These are tested invariants, not aspirations.
 | **Statistical honesty** | No point estimates without intervals; ablation uses paired bootstrap; cross-OEM claims require leave-one-OEM-out; temporal claims require forward splits. |
 | **Oracle validation** | On synthetic data with known structure, the harness must recover planted drivers and reject planted decoys. This is the harness's test suite. |
 | **Policy purity** | The decision policy is a pure function with tests at every gate boundary. |
-| **Replay** | Any past brief re-runs from its stored spec and dataset hash and can be diffed. |
+| **Replay** | `mde run replay <run_id>` re-runs a study from its stored spec and diffs every evidence record; identical on the same dataset. |
 | **Headless** | `mde run headless` runs the default plan end to end with no LLM and produces the same evidence and verdict. |
 
 ---
@@ -171,13 +175,16 @@ Dependencies point strictly downward (enforced by import-linter). The LLM lives 
 ```
 web/                    Next.js - runs, verdict gates/flags, importance / ablation / cross-OEM /
                         tornado charts, cited brief with evidence drill-down, Q&A
-motorq_de/api.py        FastAPI - /runs, /tickets, /runs/{id}/brief, /evidence, /ask
-motorq_de/agent/        runner (default plan + code-level replan predicates), service, llm
+motorq_de/api.py        FastAPI - /runs, /tickets, /runs/{id}/{brief,brief.md,evidence,events,ask,
+                        whatif,replay}, /portfolio
+motorq_de/agent/        runner (study, what-if, replay), portfolio (roadmap table + unused-signal
+                        COGS report), service, llm (Anthropic, Bedrock or Gemini), webhook (Slack)
 motorq_de/report/       typed brief; every numeric line cites; renderer fails closed
 motorq_de/ledger/       runs . steps . evidence . messages   (Postgres or SQLite)
-motorq_de/policy/       gates + flags -> verdict (pure)
-motorq_de/economics/    price_sheet.yaml (sourced) . cost . value (PERT Monte Carlo) . deployment
-motorq_de/harness/      frames . stats (cluster bootstrap) . models . experiments
+motorq_de/policy/       policy.yaml (versioned thresholds) . gates + flags -> verdict (pure)
+motorq_de/economics/    price_sheet.yaml (sourced) . value_assumptions.yaml (owned by product) .
+                        cost . value (PERT Monte Carlo on event-level metrics) . deployment
+motorq_de/harness/      frames . stats (cluster bootstrap, event-level metrics) . models . experiments
 motorq_de/quality/      coverage . quality . leakage . event_rate . usable_signals
 motorq_de/data/         DataSource protocol . FrameSource . SyntheticSource . SnowflakeSource
 motorq_de/world/        params.yaml (sourced) . coverage.yaml . registry . generator
@@ -198,10 +205,11 @@ motorq_de/world/        params.yaml (sourced) . coverage.yaml . registry . gener
 | Coverage | Fleet share with the full sufficient set 0.60 — exactly at the gate; OEMs C, E, G, H lack the wear sensor |
 | Model | 13-signal sufficient set: AUC 0.877 [0.860, 0.894] vs full 90-signal set 0.872 [0.855, 0.888]; best one-signal model on the same population 0.838, so the lift CI lower bound is +0.023 (gate passes) |
 | Robustness | Leave-one-OEM-out: mean 0.83, worst OEM H at 0.62 with 70% of features missing — **flag**. Forward split degradation +0.006 (upper bound 0.041) — **flag**, wide because the fixture is small |
-| Economics | 7.2 GB/month vs 162 GB/month for the full set (−95% volume) but infra $2 vs $37 per month at list prices; the real levers are OEM polling cadence and build effort. Net-value-optimal operating point alerts the top 0.5% of vehicle-days. P(ROI > 0) = 0.32; median net value −$31k/yr under the stated value assumptions. Verdict most sensitive to `value_bearing_fraction` and `usd_per_avoided_event` |
-| **Verdict** | **NOT_FEASIBLE** as specified: the economics gate fails because only ~10% of predicted services are assumed to carry downtime value. The brief says which assumption to revisit; a redefined target ("unplanned brake failure" rather than "any brake service") is the obvious next study |
+| Cadence | The cost-aware sufficient set already needs no realtime polling — daily/weekly signals only |
+| Economics | 7.2 GB/month vs 162 GB/month for the full set (−95% volume) but infra $2 vs $37 per month at list prices; the real levers are OEM polling cadence and build effort. Net-value-optimal operating point alerts the top 0.5% of vehicle-days: 18% of brake events caught with a median 6-day lead, 1.3 false-alert episodes per 100 vehicle-months. P(ROI > 0) = 0.92 under the stated value assumptions; the 5th-percentile ROI is still negative |
+| **Verdict** | **PILOT**: all gates pass; flags trip on cross-OEM variance (the within-OEM benchmark says OEMs C/E/G/H *lack the signal*, the model transfers fine elsewhere), temporal degradation (wide on a small fixture), ROI tail, unvalidated value assumptions, underpowered ablation, and placeholder prices |
 
-That is the tool doing its job: an honest, cited "no, and here is why" in five minutes, instead of a three-week study that arrives at "probably".
+Change the value-bearing fraction in the what-if panel and the verdict recomputes in seconds, citing the same harness evidence. That is the tool doing its job: an honest, cited answer in five minutes, with the levers exposed, instead of a three-week study that arrives at "probably".
 
 **What the first runs taught the design** (all fixed and tested):
 - A noisier full-coverage signal can beat a precise sensor with OEM gaps — real, but the generator must not cheat by giving vendor signals the hidden state. Decoys are now noisy functions of the *observed* driver.
@@ -209,6 +217,8 @@ That is the tool doing its job: an honest, cited "no, and here is why" in five m
 - Asking humans for the event rate was one invented number too many; the harness measures it.
 - Small data cannot resolve 0.005 AUC in ablation. The tool now reports its resolution and flags `ablation_underpowered` instead of pretending.
 - Per-signal infra cost is pennies at list prices. Saying so plainly is more useful than a savings slide.
+- Vehicle-day recall is not what a fleet manager experiences. Counting *events caught* and *false-alert episodes per 100 vehicle-months* changed the brake verdict from NOT_FEASIBLE to PILOT — the earlier proxy had over-counted false alerts several-fold.
+- "Worst OEM at AUC 0.49" is ambiguous until you train on that OEM alone: within-OEM ≈ held-out means the OEM lacks the signal, not that the model fails to transfer.
 
 ---
 
@@ -223,24 +233,28 @@ That is the tool doing its job: an honest, cited "no, and here is why" in five m
 | 5 | `agent/llm.py` + `api.py` — free text to spec, cited narrative, Q&A over evidence; HTTP API | done, tested with a stub client |
 | 6 | `web/` — runs, gates/flags, charts, cited brief with evidence drill-down, Q&A | done |
 | 7 | `SnowflakeSource` — production adapter | done, tested against a production-shaped fake; live connection needs credentials |
+| 8 | Event-level metrics, cost-aware + cadence ablation, within-OEM benchmark, replay, what-if, portfolio + COGS report, policy/value config files, live progress, coverage heatmap, operating-point curve, Slack webhook, Bedrock switch, SQL templates, deployment guide | done, tested |
 
 ```bash
 uv sync --extra dev --extra api --extra agent        # python 3.12
 uv run mde world generate --profile small             # ~7 s; `default` (5k vehicles, 18 months) ~2 min
-uv run mde run headless --example brake --out brief.md
+uv run mde run headless --example brake --out brief.md   # ~5 min small, ~25 min on 5k vehicles
 uv run mde run list
 uv run mde run evidence ev_<id>
+uv run mde run replay <run_id>                        # re-run and diff every evidence record
+uv run mde run whatif <run_id> --value-json '{...}'   # new human inputs, seconds
+uv run mde portfolio                                  # roadmap table + signals no capability needs
 
-# LLM interface (optional): set ANTHROPIC_API_KEY
+# LLM interface (optional): ANTHROPIC_API_KEY, or MDE_LLM_PROVIDER=bedrock|gemini (see docs/DEPLOY.md)
 uv run mde run ask "Should Fuse flag vehicles likely to need brake service in the next 7 days?"
 uv run mde ask <run_id> "Why was GPS excluded?"
 
 # API + dashboard
 uv run mde serve                                      # http://127.0.0.1:8000
 cd web && npm install && npm run dev                  # http://localhost:3000 (MDE_API_URL to point elsewhere)
-docker compose up --build                             # Postgres + API + dashboard
+docker compose up --build                             # Postgres + API + dashboard; see docs/DEPLOY.md
 
-# tests (fast suite ~4 min; slow integration ~10 min; oracle on the default dataset ~40 min)
+# tests (fast suite ~10 min; slow integration ~15 min; oracle on the default dataset ~30 min)
 uv run pytest tests -q -m "not slow"
 uv run pytest tests -q -m slow
 MDE_ORACLE_DATASET=data/synthetic/<hash> uv run pytest tests/oracle -q
