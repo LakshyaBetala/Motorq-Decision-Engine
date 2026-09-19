@@ -1,5 +1,6 @@
-"""The LLM interface - the only module that imports `anthropic`.
+"""The LLM interface - the only module that talks to a model provider.
 
+Providers: `anthropic` (default), `bedrock` (Claude on AWS), `gemini` (Google, REST via urllib).
 Three jobs, all optional (the engine runs headless without credentials):
 
     parse_spec   free text -> ProblemSpec (structured output, one repair attempt)
@@ -14,6 +15,9 @@ from __future__ import annotations
 
 import json
 import os
+import time
+import urllib.error
+import urllib.request
 from typing import Any, Literal
 
 from pydantic import BaseModel, ValidationError
@@ -23,23 +27,108 @@ from motorq_de.report.brief import Line, sanitize_narrative
 from motorq_de.schemas import Evidence, ProblemSpec, Range, ValueAssumptions, Verdict
 
 DEFAULT_MODEL = "claude-opus-5"
+GEMINI_DEFAULT_MODEL = "gemini-3.6-flash"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 
 def model_id() -> str:
-    return os.environ.get("MDE_LLM_MODEL", DEFAULT_MODEL)
+    if provider() == "gemini":
+        return os.environ.get("MDE_LLM_MODEL", GEMINI_DEFAULT_MODEL)
+    m = os.environ.get("MDE_LLM_MODEL", DEFAULT_MODEL)
+    if provider() == "bedrock" and not m.startswith("anthropic."):
+        m = "anthropic." + m  # Bedrock model ids carry the vendor prefix
+    return m
+
+
+def provider() -> str:
+    """anthropic (default), bedrock (AWS credentials + AWS_REGION) or gemini (GEMINI_API_KEY)."""
+    return os.environ.get("MDE_LLM_PROVIDER", "anthropic").lower()
 
 
 def llm_available() -> bool:
+    if provider() == "gemini":
+        return bool(os.environ.get("GEMINI_API_KEY"))
     try:
         import anthropic  # noqa: F401
     except ImportError:
         return False
+    if provider() == "bedrock":
+        return bool(os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION"))
     return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+
+
+# --------------------------------------------------------------------------- gemini transport
+
+
+def _gemini_call(
+    system: str,
+    contents: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None = None,
+    json_schema: dict[str, Any] | None = None,
+    max_tokens: int = 8192,
+) -> dict[str, Any]:
+    """One generateContent request. Returns the first candidate's content (its parts).
+
+    Gemini 3 counts its thinking against maxOutputTokens, so thinking is kept low and the
+    budget generous; a MAX_TOKENS finish is surfaced instead of returning a truncated tail."""
+    payload: dict[str, Any] = {
+        "systemInstruction": {"parts": [{"text": system}]},
+        "contents": contents,
+        "generationConfig": {
+            "maxOutputTokens": max_tokens,
+            "temperature": 0,
+            "thinkingConfig": {"thinkingLevel": os.environ.get("MDE_GEMINI_THINKING", "low")},
+        },
+    }
+    if json_schema is not None:
+        payload["generationConfig"]["responseMimeType"] = "application/json"
+        payload["generationConfig"]["responseJsonSchema"] = json_schema
+    if tools:
+        payload["tools"] = [{"functionDeclarations": tools}]
+    req = urllib.request.Request(
+        GEMINI_URL.format(model=model_id()),
+        data=json.dumps(payload).encode(),
+        headers={
+            "content-type": "application/json",
+            "x-goog-api-key": os.environ.get("GEMINI_API_KEY", ""),
+        },
+    )
+    body = _http_json(req)
+    cands = body.get("candidates") or []
+    if not cands:
+        raise RuntimeError(f"gemini returned no candidates: {json.dumps(body)[:300]}")
+    if cands[0].get("finishReason") == "MAX_TOKENS":
+        raise RuntimeError("gemini hit maxOutputTokens before finishing; raise max_tokens")
+    return cands[0].get("content") or {"role": "model", "parts": []}
+
+
+GEMINI_RETRY_STATUS = {429, 500, 503}
+
+
+def _http_json(req: urllib.request.Request, attempts: int = 5) -> dict[str, Any]:
+    """POST and decode; retries transient statuses. 429 (free-tier requests-per-minute) backs
+    off 8/16/32/64 s; 5xx backs off 2/4/8/16 s."""
+    for i in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:  # noqa: S310
+                return json.loads(r.read())
+        except urllib.error.HTTPError as exc:
+            if exc.code not in GEMINI_RETRY_STATUS or i == attempts - 1:
+                raise
+            time.sleep((8 if exc.code == 429 else 2) * 2**i)
+    raise RuntimeError("unreachable")
+
+
+def _gemini_text(content: dict[str, Any]) -> str:
+    return "".join(p.get("text", "") for p in content.get("parts", []) if "text" in p)
 
 
 def _client():
     import anthropic
 
+    if provider() == "bedrock":
+        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+        return anthropic.AnthropicBedrockMantle(aws_region=region)
     return anthropic.Anthropic()
 
 
@@ -69,7 +158,9 @@ class SpecDraft(BaseModel):
     horizon_days: int
     delivery_mode: Literal["batch_daily", "batch_hourly", "streaming"] = "batch_daily"
     consumer: Literal["fuse_action_hub", "fuse_assistant", "api", "internal"] = "fuse_action_hub"
-    min_oem_coverage: float = 0.6
+    # Constraints stay None unless the request states them; the engine's defaults apply.
+    # A model that "helpfully" tightens coverage or latency would otherwise move the verdict.
+    min_oem_coverage: float | None = None
     max_latency_s: int | None = None
     value: ValueDraft | None = None
     interpretation_notes: str = ""
@@ -78,27 +169,39 @@ class SpecDraft(BaseModel):
 PARSE_SYSTEM = """You turn a product request about a connected-vehicle capability into a structured
 ProblemSpec for a feasibility engine. Choose the closest supported target_event. Set horizon_days
 from the request (default 7 for maintenance, 30 for theft, 14 for battery). Only fill `value`
-if the request states business numbers; otherwise leave it null. Put any judgement calls in
-interpretation_notes. Do not invent numbers."""
+if the request states business numbers; otherwise leave it null. Leave min_oem_coverage and
+max_latency_s null unless the request states a coverage or latency requirement. Put any
+judgement calls in interpretation_notes. Do not invent numbers."""
+
+
+def _draft(text: str, last_err: str) -> SpecDraft:
+    system = PARSE_SYSTEM + (
+        f"\n\nPrevious attempt failed validation: {last_err}" if last_err else ""
+    )
+    if provider() == "gemini":
+        content = _gemini_call(
+            system,
+            [{"role": "user", "parts": [{"text": text}]}],
+            json_schema=SpecDraft.model_json_schema(),
+        )
+        return SpecDraft.model_validate_json(_gemini_text(content))
+    resp = _client().messages.parse(
+        model=model_id(),
+        max_tokens=4096,
+        system=system,
+        messages=[{"role": "user", "content": text}],
+        output_format=SpecDraft,
+    )
+    return resp.parsed_output
 
 
 def parse_spec(text: str, defaults: dict[str, dict[str, Any]]) -> tuple[ProblemSpec, str]:
     """Free text -> validated ProblemSpec. `defaults` maps target_event -> value dict used when
     the request supplies no business numbers. Returns (spec, notes)."""
-    client = _client()
-    messages: list[dict[str, Any]] = [{"role": "user", "content": text}]
     last_err = ""
     for _attempt in range(2):
-        resp = client.messages.parse(
-            model=model_id(),
-            max_tokens=4096,
-            system=PARSE_SYSTEM
-            + (f"\n\nPrevious attempt failed validation: {last_err}" if last_err else ""),
-            messages=messages,
-            output_format=SpecDraft,
-        )
-        draft: SpecDraft = resp.parsed_output
         try:
+            draft = _draft(text, last_err)
             if draft.value is not None:
                 value = ValueAssumptions(
                     value_bearing_fraction=Range(**draft.value.value_bearing_fraction.model_dump()),
@@ -128,8 +231,12 @@ def parse_spec(text: str, defaults: dict[str, dict[str, Any]]) -> tuple[ProblemS
                 consumer=draft.consumer,
                 value=value,
                 constraints={
-                    "min_oem_coverage": draft.min_oem_coverage,
-                    "max_latency_s": draft.max_latency_s,
+                    k: v
+                    for k, v in {
+                        "min_oem_coverage": draft.min_oem_coverage,
+                        "max_latency_s": draft.max_latency_s,
+                    }.items()
+                    if v is not None
                 },
             )
             return spec, notes.strip()
@@ -198,14 +305,22 @@ decision; it is computed by policy and the build decision is a human call."""
 
 
 def narrative(ev: dict[str, Evidence], verdict: Verdict) -> list[Line]:
-    client = _client()
-    resp = client.messages.create(
-        model=model_id(),
-        max_tokens=2048,
-        system=NARRATIVE_SYSTEM,
-        messages=[{"role": "user", "content": _digest(ev, verdict)}],
-    )
-    text = "".join(b.text for b in resp.content if b.type == "text")
+    if provider() == "gemini":
+        content = _gemini_call(
+            NARRATIVE_SYSTEM
+            + "\n\nOutput only the final sentences: no headings, no working notes.",
+            [{"role": "user", "parts": [{"text": _digest(ev, verdict)}]}],
+            max_tokens=16384,
+        )
+        text = _gemini_text(content)
+    else:
+        resp = _client().messages.create(
+            model=model_id(),
+            max_tokens=2048,
+            system=NARRATIVE_SYSTEM,
+            messages=[{"role": "user", "content": _digest(ev, verdict)}],
+        )
+        text = "".join(b.text for b in resp.content if b.type == "text")
     known = {e.evidence_id for e in ev.values()}
     kept, _dropped = sanitize_narrative(text, known)
     return kept
@@ -240,13 +355,64 @@ QA_TOOLS = [
 ]
 
 
+# Gemini function declarations use the OpenAPI subset: no type unions, no additionalProperties.
+QA_TOOLS_GEMINI = [
+    {
+        "name": "list_evidence",
+        "description": QA_TOOLS[0]["description"],
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_evidence",
+        "description": QA_TOOLS[1]["description"],
+        "parameters": {
+            "type": "object",
+            "properties": {"evidence_id": {"type": "string"}, "key": {"type": "string"}},
+            "required": ["evidence_id"],
+        },
+    },
+]
+
+
+def _answer_gemini(ledger: Ledger, run: dict[str, Any], context: str, max_turns: int) -> str:
+    contents: list[dict[str, Any]] = [{"role": "user", "parts": [{"text": context}]}]
+    text = ""
+    for _ in range(max_turns):
+        content = _gemini_call(QA_SYSTEM, contents, tools=QA_TOOLS_GEMINI)
+        text = _gemini_text(content)
+        calls = [p["functionCall"] for p in content.get("parts", []) if "functionCall" in p]
+        if not calls:
+            break
+        contents.append(content)  # echoed verbatim so any thought signatures survive
+        contents.append(
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "functionResponse": {
+                            "name": c["name"],
+                            "response": {
+                                "result": _run_tool(ledger, run, c["name"], c.get("args") or {})
+                            },
+                        }
+                    }
+                    for c in calls
+                ],
+            }
+        )
+    return text
+
+
 def answer(ledger: Ledger, run_id: str, question: str, max_turns: int = 6) -> tuple[str, list[str]]:
-    client = _client()
     run = ledger.get_run(run_id)
     if run is None:
         raise KeyError(run_id)
     known = {e["evidence_id"] for e in run["evidence"]}
     context = f"Run {run_id}: capability {run['spec'].get('capability_name')}, target {run['spec'].get('target_event')}, decision {(run['verdict'] or {}).get('decision')}.\n\nQuestion: {question}"
+    if provider() == "gemini":
+        text = _answer_gemini(ledger, run, context, max_turns)
+        return _finish_answer(ledger, run_id, question, text, known)
+    client = _client()
     messages: list[dict[str, Any]] = [{"role": "user", "content": context}]
     text = ""
     for _ in range(max_turns):
@@ -272,6 +438,13 @@ def answer(ledger: Ledger, run_id: str, question: str, max_turns: int = 6) -> tu
                 }
             )
         messages.append({"role": "user", "content": results})
+    return _finish_answer(ledger, run_id, question, text, known)
+
+
+def _finish_answer(
+    ledger: Ledger, run_id: str, question: str, text: str, known: set[str]
+) -> tuple[str, list[str]]:
+    """The same guardrail for every provider: keep only sentences whose citations exist."""
     kept, _ = sanitize_narrative(text, known)
     cited = sorted({i for ln in kept for i in ln.evidence_ids})
     clean = (

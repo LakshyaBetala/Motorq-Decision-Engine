@@ -213,3 +213,137 @@ def test_llm_available_requires_credentials(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
     assert llm.llm_available() is False
+
+
+def test_bedrock_provider_switch(monkeypatch):
+    monkeypatch.setenv("MDE_LLM_PROVIDER", "bedrock")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+    assert llm.llm_available() is False
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    assert llm.llm_available() is True
+    assert llm.model_id() == "anthropic.claude-opus-5"
+    monkeypatch.setenv("MDE_LLM_PROVIDER", "anthropic")
+    assert llm.model_id() == "claude-opus-5"
+
+
+# --------------------------------------------------------------------------- gemini provider
+
+
+def _gemini_stub(monkeypatch, replies):
+    """Stub the transport: each call pops one canned candidate content (parts)."""
+    calls = []
+
+    def fake_call(system, contents, tools=None, json_schema=None, max_tokens=8192):
+        calls.append(
+            {"system": system, "contents": contents, "tools": tools, "schema": json_schema}
+        )
+        return replies.pop(0)
+
+    monkeypatch.setenv("MDE_LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(llm, "_gemini_call", fake_call)
+    return calls
+
+
+def _text_reply(text):
+    return {"role": "model", "parts": [{"text": text}]}
+
+
+def test_gemini_provider_switch(monkeypatch):
+    monkeypatch.setenv("MDE_LLM_PROVIDER", "gemini")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("MDE_LLM_MODEL", raising=False)
+    assert llm.llm_available() is False
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    assert llm.llm_available() is True
+    assert llm.model_id() == llm.GEMINI_DEFAULT_MODEL
+
+
+def test_gemini_parse_spec_keeps_engine_defaults_for_unstated_constraints(monkeypatch):
+    draft = {
+        "capability_name": "brake_7d",
+        "target_event": "brake_service_event",
+        "horizon_days": 7,
+        "value": None,
+        "interpretation_notes": "",
+    }
+    calls = _gemini_stub(monkeypatch, [_text_reply(json.dumps(draft))])
+    spec, notes = parse_spec("brake service in 7 days?", DEFAULTS)
+    assert calls[0]["schema"] is not None  # structured output was requested
+    assert spec.constraints.min_oem_coverage == 0.6 and spec.constraints.max_latency_s is None
+    assert spec.value.source_note.startswith("DEFAULTS")
+    assert "defaulted" in notes.lower()
+
+
+def test_gemini_parse_spec_repairs_invalid_json_once(monkeypatch):
+    good = {"capability_name": "brake_7d", "target_event": "brake_service_event", "horizon_days": 7}
+    calls = _gemini_stub(monkeypatch, [_text_reply("not json"), _text_reply(json.dumps(good))])
+    spec, _ = parse_spec("brake service in 7 days?", DEFAULTS)
+    assert spec.target_event == "brake_service_event"
+    assert "failed validation" in calls[1]["system"]
+
+
+def test_gemini_narrative_drops_uncited_numbers(monkeypatch):
+    ev = {"roi": _ev("roi", "ev_aaaaaaaaaaaa", {"p_roi_positive": 0.4})}
+    text = (
+        "P(ROI>0) is 0.40 [ev_aaaaaaaaaaaa]. "
+        "Coverage is 0.9 across the fleet. "
+        "A pilot should validate the value assumptions."
+    )
+    _gemini_stub(monkeypatch, [_text_reply(text)])
+    lines = narrative(ev, _verdict())
+    assert [ln.text for ln in lines] == [
+        "P(ROI>0) is 0.40 [ev_aaaaaaaaaaaa].",
+        "A pilot should validate the value assumptions.",
+    ]
+
+
+def test_gemini_answer_runs_tool_loop_and_cites_only_known_evidence(monkeypatch):
+    led = Ledger(memory_engine())
+    spec = ProblemSpec(
+        capability_name="t",
+        target_event="brake_service_event",
+        value=ValueAssumptions(
+            value_bearing_fraction=Range(low=0.05, base=0.1, high=0.2),
+            preventable_fraction=Range(low=0.3, base=0.4, high=0.5),
+            usd_per_avoided_event=Range(low=1, base=2, high=3),
+            fleet_size=Range(low=1, base=2, high=3),
+        ),
+    )
+    led.create_run("run1", spec, "ds", True, "q")
+    e = led.record(
+        "run1",
+        "EXPERIMENT",
+        "ablation",
+        {"k": 1},
+        "ds",
+        1,
+        lambda: {"sufficient_set": ["a", "b"], "removed_in_order": ["gps_lat_mean"]},
+    )
+    led.finish_run("run1", _verdict(), "md", {})
+    replies = [
+        {"role": "model", "parts": [{"functionCall": {"name": "list_evidence", "args": {}}}]},
+        {
+            "role": "model",
+            "parts": [
+                {"functionCall": {"name": "get_evidence", "args": {"evidence_id": e.evidence_id}}}
+            ],
+        },
+        _text_reply(
+            f"GPS added nothing so it was removed [{e.evidence_id}]. "
+            "It would have cost $9,999 more [ev_000000000000]. It matters for theft."
+        ),
+    ]
+    calls = _gemini_stub(monkeypatch, replies)
+    text, cited = answer(led, "run1", "why was GPS removed?")
+    assert cited == [e.evidence_id]
+    assert "$9,999" not in text and "It matters for theft." in text
+    assert calls[0]["tools"] == llm.QA_TOOLS_GEMINI
+    # model turns are echoed verbatim and tool results fed back as functionResponse parts
+    fed = calls[2]["contents"]
+    assert fed[1]["parts"][0]["functionCall"]["name"] == "list_evidence"
+    payload = json.loads(fed[4]["parts"][0]["functionResponse"]["response"]["result"])
+    assert payload["sufficient_set"] == ["a", "b"]
+    assert led.messages("run1")[-1]["evidence_ids"] == [e.evidence_id]
