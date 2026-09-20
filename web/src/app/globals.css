@@ -3,8 +3,60 @@
 @tailwind utilities;
 
 :root { color-scheme: light; }
-html { font-feature-settings: "cv02", "cv03", "cv04", "cv11"; }
-body { @apply bg-ink-100 text-ink-900 antialiased; }
-.card { @apply rounded-lg border border-ink-300/70 bg-white shadow-sm; }
-.mono { @apply font-mono text-[12px]; }
-.cite { @apply mono inline-block rounded bg-ink-100 px-1 py-[1px] text-ink-700 hover:bg-ink-300/60 cursor-pointer; }
+html { font-feature-settings: "cv11", "ss01"; }
+body { @apply bg-ink-100 text-ink-950 antialiased; }
+
+/* numbers, ids and signal names are always set in the mono face with tabular figures */
+.mono { @apply font-mono text-[12px] tabular-nums; }
+.num { @apply font-mono tabular-nums; }
+
+/* a citation is a link into the ledger: the one accented element on the page */
+.cite {
+  @apply mono inline-block rounded-sm px-1 py-[1px] text-accent underline decoration-accent/40 underline-offset-2;
+  transition: background-color 120ms ease, text-decoration-color 120ms ease;
+}
+.cite:hover { @apply bg-accent-soft decoration-accent; }
+.cite:active { transform: scale(0.98); }
+
+/* surfaces: a panel only where a plot or a form needs a frame */
+.panel { @apply rounded-md border border-ink-300 bg-white; }
+.rule { @apply border-t border-ink-300; }
+
+/* buttons */
+.btn {
+  @apply inline-flex items-center gap-1.5 rounded-md border border-ink-300 bg-white px-3 py-1.5 text-sm text-ink-900;
+  transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1), background-color 120ms ease, border-color 120ms ease;
+}
+.btn:hover { @apply border-ink-400 bg-ink-100; }
+.btn:active { transform: scale(0.98); }
+.btn:disabled { @apply cursor-not-allowed opacity-40; }
+.btn-primary { @apply border-ink-950 bg-ink-950 text-white; }
+.btn-primary:hover { @apply border-ink-900 bg-ink-900; }
+
+/* forms: label above, helper below */
+.field { @apply grid gap-1.5; }
+.field > label { @apply text-sm text-ink-700; }
+.input { @apply w-full rounded-md border border-ink-300 bg-white px-3 py-2 text-sm text-ink-950; }
+.input:focus { @apply border-ink-500; }
+
+/* keyboard focus is always visible */
+:focus-visible { outline: 2px solid #3157b5; outline-offset: 2px; border-radius: 3px; }
+
+/* skeletons */
+.skeleton { @apply rounded bg-ink-200; animation: shimmer 1.4s ease-in-out infinite; }
+@keyframes shimmer { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+
+/* a stage that is running breathes; nothing else moves on its own */
+.live { animation: breathe 1.6s ease-in-out infinite; }
+@keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+/* the evidence drawer opens from the right, where the citations point */
+.drawer { transform: translateX(100%); transition: transform 200ms cubic-bezier(0.23, 1, 0.32, 1); }
+.drawer[data-open="true"] { transform: translateX(0); }
+.scrim { opacity: 0; transition: opacity 200ms ease; pointer-events: none; }
+.scrim[data-open="true"] { opacity: 1; pointer-events: auto; }
+
+@media (prefers-reduced-motion: reduce) {
+  .drawer, .scrim, .btn, .cite { transition-duration: 1ms; }
+  .live, .skeleton { animation: none; }
+}

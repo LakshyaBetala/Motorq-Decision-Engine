@@ -92,7 +92,7 @@ A deterministic pipeline with an optional LLM front end.
    +---------+----------+
              v
    +--------------------+   pure function of evidence: 4 hard gates (+ a cost gate when a
-   |                     |   ceiling is requested) + 9 uncertainty
+   |                     |   ceiling is requested) + 10 uncertainty
    |  Decision policy    |   flags (policy.yaml, versioned) -> BUILD_READY / PILOT /
    |                     |   NOT_FEASIBLE
    +---------+----------+
@@ -118,6 +118,7 @@ HARD GATES         any failure -> NOT_FEASIBLE
   model      lower CI bound of (AUC - AUC of the best ONE-signal model on the same population) > 0
   economics  P(ROI > 0) >= 0.5 under the supplied value ranges
   delivery   at least one deployment pattern meets the horizon / latency constraints
+  cost       (only when the request states max_run_cost_usd_month) marginal run cost <= ceiling
 
 UNCERTAINTY FLAGS  any trip -> PILOT instead of BUILD_READY
   cross_oem_variance      leave-one-OEM-out AUC std > 0.03, or worst OEM > 0.05 below mean
@@ -125,12 +126,17 @@ UNCERTAINTY FLAGS  any trip -> PILOT instead of BUILD_READY
   roi_spans_negative      5th-percentile ROI < 0
   value_unvalidated       value assumptions not yet validated against pilot outcomes
   short_history           a sufficient-set signal has < 6 months of history
-  ablation_underpowered   the bootstrap could not resolve tolerance/2 (0.0025 AUC)
+  ablation_underpowered   an accepted removal rests on a bootstrap that could not resolve
+                          tolerance/2 (0.0025 AUC)
   suspicious_signals      a sufficient-set signal is unusually strong - confirm it exists
                           before, not because of, the event
   cost_placeholders       the run cost rests on placeholder unit prices
+  alert_burden            > 25 false-alert episodes per 100 vehicle-months at the chosen point
+  data_still_improving    learning curve still rising (> 0.01 AUC from half to all vehicles):
+                          the reported AUC is a lower bound
 
-BUILD_READY only if every gate passes and no flag trips.
+BUILD_READY only if every gate passes and no flag trips. Thresholds live in policy/policy.yaml
+(version 1.3); the brief stamps the version.
 ```
 
 "BUILD_READY" means *the evidence supports building*. Whether to build is still a human call.
@@ -235,12 +241,13 @@ Change the value-bearing fraction in the what-if panel and the verdict recompute
 | 6 | `web/` — runs, gates/flags, charts, cited brief with evidence drill-down, Q&A | done |
 | 7 | `SnowflakeSource` — production adapter | done, tested against a production-shaped fake; live connection needs credentials |
 | 8 | Event-level metrics, cost-aware + cadence ablation, within-OEM benchmark, replay, what-if, portfolio + COGS report, policy/value config files, live progress, coverage heatmap, operating-point curve, Slack webhook, Bedrock switch, SQL templates, deployment guide | done, tested |
+| 10 | Fit cache (no duplicate fits; bit-identical hits; replay bypasses it), learning curve with the `data_still_improving` flag (policy 1.3); dashboard redesigned as an evidence ledger: numbered stage rail, sticky verdict strip, evidence drawer, data-contract and quality table, redundancy groups, learning curve, runtime; Geist type, skeleton/empty/error states | done, tested |
 | 9 | Canonical data contract (validated at every DEFINE, `mde data check`), COVESA VSS mapping of the signal registry, frozen-sensor and plausibility checks, runtime fingerprint with replay environment comparison, signal redundancy groups, cost-ceiling gate; [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) answers the methodology questions | done, tested |
 
 ```bash
 uv sync --extra dev --extra api --extra agent        # python 3.12
 uv run mde world generate --profile small             # ~7 s; `default` (5k vehicles, 18 months) ~2 min
-uv run mde run headless --example brake --out brief.md   # ~5 min small, ~25 min on 5k vehicles
+uv run mde run headless --example brake --out brief.md   # ~3 min small (2 min with a warm fit cache), ~15 min on 5k vehicles
 uv run mde data check                                 # canonical contract on the active source
 uv run mde run list
 uv run mde run evidence ev_<id>

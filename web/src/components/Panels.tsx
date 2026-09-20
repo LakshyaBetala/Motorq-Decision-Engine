@@ -25,7 +25,7 @@ export function CoverageHeatmap({ cov }: { cov: any }) {
               <td className="mono pr-2 text-ink-700">{s}</td>
               {oems.map((o) => {
                 const v = cell(s, o);
-                return <td key={o} className="px-1 py-[2px]"><div title={`${s} · ${o}: ${(v * 100).toFixed(0)}%`} className="h-4 w-8 rounded-sm" style={{ background: color(v) }} /></td>;
+                return <td key={o} className="px-1 py-[2px]"><div title={`${s} on ${o}: ${(v * 100).toFixed(0)}%`} className="h-4 w-8 rounded-sm" style={{ background: color(v) }} /></td>;
               })}
               <td className="pl-2 text-ink-500">{(Object.values(cov.per_signal[s] ?? {}) as any[]).reduce((a, c) => a + c.vehicles_covered, 0)}</td>
             </tr>
@@ -56,13 +56,13 @@ export function AblationTable({ ab }: { ab: any }) {
               <td>{t.n_signals}</td>
               <td>{t.auc.point.toFixed(4)}</td>
               <td>{t.delta_vs_full ? `${t.delta_vs_full.point >= 0 ? "+" : ""}${t.delta_vs_full.point.toFixed(4)} [${t.delta_vs_full.lo.toFixed(4)}, ${t.delta_vs_full.hi.toFixed(4)}]` : "—"}</td>
-              <td>{t.p_noninferior != null ? t.p_noninferior.toFixed(2) : "—"}{t.underpowered ? " ⚠" : ""}</td>
-              <td>{t.removed == null ? "full" : t.accepted ? "removed" : "kept — stop"}</td>
+              <td>{t.p_noninferior != null ? t.p_noninferior.toFixed(2) : "—"}{t.underpowered ? " (underpowered)" : ""}</td>
+              <td>{t.removed == null ? "full set" : t.accepted ? "removed" : "kept: needed"}</td>
             </tr>
           ))}
         </tbody>
       </table>
-      <p className="mt-1 text-xs text-ink-500">{ab.cost_aware ? "Cost-aware order (least importance per dollar removed first). " : ""}Tolerance {ab.tolerance} AUC at {(ab.noninferiority_confidence * 100).toFixed(0)}% bootstrap confidence. ⚠ = bootstrap could not resolve tolerance/2.</p>
+      <p className="mt-1 text-xs text-ink-500">{ab.cost_aware ? "Cost-aware order (least importance per dollar removed first). " : ""}Tolerance {ab.tolerance} AUC at {(ab.noninferiority_confidence * 100).toFixed(0)}% bootstrap confidence. Underpowered: the bootstrap could not resolve half the tolerance on an accepted removal.</p>
     </div>
   );
 }
@@ -73,11 +73,11 @@ export function OperatingCurve({ points, chosen }: { points: any[]; chosen: any 
   return (
     <ResponsiveContainer width="100%" height={220}>
       <LineChart data={data} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
-        <CartesianGrid stroke="#e2e8f0" vertical={false} />
+        <CartesianGrid stroke="#e8ebef" vertical={false} />
         <XAxis dataKey="alert" tick={{ fontSize: 11 }} tickFormatter={(v) => `${v}%`} label={{ value: "vehicle-days alerted", position: "insideBottom", offset: -4, fontSize: 11 }} />
         <YAxis domain={[0, 1]} tick={{ fontSize: 11 }} width={36} />
-        <Tooltip formatter={(v: number, n) => [typeof v === "number" ? v.toFixed(3) : v, n]} labelFormatter={(l, p) => `alert ${l}% · ${p?.[0]?.payload?.fa?.toFixed(1)} false alerts / 100 veh-months`} contentStyle={{ fontSize: 12 }} />
-        <Line type="monotone" dataKey="event_recall" name="events caught" stroke="#0f172a" dot={{ r: 2 }} isAnimationActive={false} />
+        <Tooltip formatter={(v: number, n) => [typeof v === "number" ? v.toFixed(3) : v, n]} labelFormatter={(l, p) => `alert ${l}%: ${p?.[0]?.payload?.fa?.toFixed(1)} false alerts per 100 vehicle-months`} contentStyle={{ fontSize: 12 }} />
+        <Line type="monotone" dataKey="event_recall" name="events caught" stroke="#14161a" dot={{ r: 2 }} isAnimationActive={false} />
         <Line type="monotone" dataKey="precision" name="precision" stroke="#94a3b8" dot={{ r: 2 }} isAnimationActive={false} />
         {chosen && <ReferenceDot x={chosen.alert_rate * 100} y={chosen.recall} r={6} fill="#b45309" stroke="none" />}
       </LineChart>
@@ -115,16 +115,16 @@ export function WhatIf({ runId, value, onDone }: { runId: string; value: Record<
           <span className="text-ink-700">{f.label}</span>
           {(["low", "base", "high"] as const).map((w) => (
             <label key={w} className="flex items-center gap-1 text-ink-500">{w}
-              <input type="number" step={f.step} min={0} max={f.max} className="w-24 rounded border border-ink-300 px-1 py-[2px] text-right text-ink-900" value={v[f.key]?.[w] ?? 0} onChange={(e) => set(f.key, w, Number(e.target.value))} />
+              <input type="number" step={f.step} min={0} max={f.max} className="input num w-24 px-1 py-[2px] text-right" value={v[f.key]?.[w] ?? 0} onChange={(e) => set(f.key, w, Number(e.target.value))} />
             </label>
           ))}
         </div>
       ))}
       <div className="flex items-center gap-3">
-        <button onClick={run} disabled={busy} className="rounded bg-ink-900 px-3 py-1.5 text-sm text-white disabled:opacity-40">{busy ? "Recomputing…" : "Recompute economics + verdict"}</button>
-        <span className="text-xs text-ink-500">Seconds: reuses this study's harness evidence, records a derived run.</span>
+        <button onClick={run} disabled={busy} className="btn btn-primary">{busy ? "Recomputing" : "Recompute economics and verdict"}</button>
+        <span className="text-xs text-ink-500">Takes seconds. Reuses this study&apos;s evidence and records a derived study.</span>
       </div>
-      {err && <p className="text-xs text-red-700">{err}</p>}
+      {err && <p className="text-xs text-verdict-no">{err}</p>}
     </div>
   );
 }

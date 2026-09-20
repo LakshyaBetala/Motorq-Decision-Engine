@@ -8,10 +8,10 @@ export function AblationTrace({ trace }: { trace: any[] }) {
   return (
     <ResponsiveContainer width="100%" height={220}>
       <LineChart data={data} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
-        <CartesianGrid stroke="#e2e8f0" vertical={false} />
+        <CartesianGrid stroke="#e8ebef" vertical={false} />
         <XAxis dataKey="step" tick={{ fontSize: 11 }} label={{ value: "signals removed", position: "insideBottom", offset: -4, fontSize: 11 }} />
         <YAxis domain={["auto", "auto"]} tick={{ fontSize: 11 }} tickFormatter={(v) => v.toFixed(3)} width={48} />
-        <Tooltip formatter={(v: number) => v.toFixed(4)} labelFormatter={(l, p) => `step ${l} · removed ${p?.[0]?.payload?.label}${p?.[0]?.payload?.accepted ? "" : " (rejected)"}`} contentStyle={{ fontSize: 12 }} />
+        <Tooltip formatter={(v: number) => v.toFixed(4)} labelFormatter={(l, p) => `step ${l}: removed ${p?.[0]?.payload?.label}${p?.[0]?.payload?.accepted ? "" : " (rejected)"}`} contentStyle={{ fontSize: 12 }} />
         <Line type="monotone" dataKey="auc" stroke={C.primary} dot={{ r: 3 }} isAnimationActive={false}>
           <ErrorBar dataKey="err" width={3} stroke={C.muted} />
         </Line>
@@ -27,7 +27,7 @@ export function CrossOem({ per_oem, mean }: { per_oem: Record<string, any>; mean
   return (
     <ResponsiveContainer width="100%" height={220}>
       <BarChart data={data} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
-        <CartesianGrid stroke="#e2e8f0" vertical={false} />
+        <CartesianGrid stroke="#e8ebef" vertical={false} />
         <XAxis dataKey="oem" tick={{ fontSize: 11 }} />
         <YAxis domain={[0.5, 1]} tick={{ fontSize: 11 }} width={40} />
         <Tooltip formatter={(v: number, n, p) => [`${v.toFixed(3)} (missing features ${(p.payload.missing * 100).toFixed(0)}%)`, "AUC held out"]} contentStyle={{ fontSize: 12 }} />
@@ -45,7 +45,7 @@ export function Tornado({ ranked, base }: { ranked: any[]; base: number }) {
   return (
     <ResponsiveContainer width="100%" height={40 + 26 * data.length}>
       <BarChart data={data} layout="vertical" margin={{ top: 4, right: 16, left: 8, bottom: 4 }} stackOffset="sign">
-        <CartesianGrid stroke="#e2e8f0" horizontal={false} />
+        <CartesianGrid stroke="#e8ebef" horizontal={false} />
         <XAxis type="number" tick={{ fontSize: 11 }} tickFormatter={(v) => (v + base).toFixed(1)} />
         <YAxis type="category" dataKey="input" tick={{ fontSize: 11 }} width={150} />
         <Tooltip formatter={(v: number) => (v + base).toFixed(2)} contentStyle={{ fontSize: 12 }} />
@@ -62,7 +62,7 @@ export function Importance({ ranking }: { ranking: any[] }) {
   return (
     <ResponsiveContainer width="100%" height={40 + 22 * data.length}>
       <BarChart data={data} layout="vertical" margin={{ top: 4, right: 16, left: 8, bottom: 4 }}>
-        <CartesianGrid stroke="#e2e8f0" horizontal={false} />
+        <CartesianGrid stroke="#e8ebef" horizontal={false} />
         <XAxis type="number" tick={{ fontSize: 11 }} tickFormatter={(v) => v.toFixed(3)} />
         <YAxis type="category" dataKey="signal" tick={{ fontSize: 11 }} width={170} />
         <Tooltip formatter={(v: number) => v.toFixed(4)} contentStyle={{ fontSize: 12 }} />
