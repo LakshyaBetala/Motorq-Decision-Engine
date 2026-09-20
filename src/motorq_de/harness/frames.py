@@ -22,6 +22,8 @@ import numpy as np
 import pandas as pd
 
 from motorq_de.data.source import DataSource
+from motorq_de.harness.fitcache import FitCache
+from motorq_de.harness.models import oof_predictions
 from motorq_de.hashing import hash_inputs
 from motorq_de.schemas import ProblemSpec
 
@@ -43,6 +45,9 @@ class Matrix:
     neg_sampling_fraction: float
     n_pos_total: int
     n_neg_total: int
+    # identity of the ROWS (dataset, label definition, sampling); independent of the signals,
+    # so a fit on a signal subset is the same whichever parent matrix it was selected from
+    row_key: str = ""
 
     def select(self, signals: list[str]) -> Matrix:
         keep = [i for i, s in enumerate(self.signal_of) if s in set(signals)]
@@ -60,6 +65,7 @@ class Matrix:
             neg_sampling_fraction=self.neg_sampling_fraction,
             n_pos_total=self.n_pos_total,
             n_neg_total=self.n_neg_total,
+            row_key=self.row_key,
         )
 
     @property
@@ -71,9 +77,36 @@ class FeatureStore:
     """Builds and caches the feature matrix for (dataset, spec, signals). One build per tool
     chain; every tool selects columns from it, so all experiments see identical rows."""
 
-    def __init__(self, source: DataSource):
+    def __init__(self, source: DataSource, fits: FitCache | None = None):
         self.source = source
         self._cache: dict[str, Matrix] = {}
+        self.fits = fits or FitCache()
+
+    def row_key(self, spec: ProblemSpec, max_rows: int, neg_ratio: int) -> str:
+        """What determines the rows of a matrix: dataset, label definition and sampling."""
+        return hash_inputs(
+            {
+                "dataset": self.source.dataset_hash,
+                "target_event": spec.target_event,
+                "horizon_days": spec.horizon_days,
+                "decision_unit": spec.decision_unit,
+                "powertrain": spec.powertrain_scope,
+                "seed": spec.seed,
+                "max_rows": max_rows,
+                "neg_ratio": neg_ratio,
+            }
+        )
+
+    def oof(self, model: str, M: Matrix, seed: int, n_splits: int) -> np.ndarray:
+        """Out-of-fold predictions for M, served from the fit cache when the identical fit
+        has been done before (same rows, ordered signals, model, folds, seed, environment)."""
+        key = FitCache.key(M.row_key, M.signals, model, n_splits, seed)
+        hit = self.fits.get(key)
+        if hit is not None:
+            return hit
+        oof = oof_predictions(model, M.X, M.y, M.w, M.groups, n_splits, seed)
+        self.fits.put(key, oof, {"signals": list(M.signals), "model": model, "seed": seed})
+        return oof
 
     def key(self, spec: ProblemSpec, signals: list[str], max_rows: int, neg_ratio: int) -> str:
         return hash_inputs(
@@ -91,7 +124,9 @@ class FeatureStore:
     ) -> Matrix:
         k = self.key(spec, signals, max_rows, neg_ratio)
         if k not in self._cache:
-            self._cache[k] = build_matrix(self.source, spec, signals, max_rows, neg_ratio)
+            m = build_matrix(self.source, spec, signals, max_rows, neg_ratio)
+            m.row_key = self.row_key(spec, max_rows, neg_ratio)
+            self._cache[k] = m
         return self._cache[k]
 
 

@@ -1,7 +1,8 @@
 # Decision policy thresholds. Versioned: bump `version` on any change; the brief stamps it.
+# 1.3: `data_still_improving` flag (learning-curve gain from half to all vehicles > 0.01).
 # 1.2: `cost` gate when a request states max_run_cost_usd_month (marginal run cost <= ceiling).
 # Owner: data-science lead. Review before each roadmap cycle.
-version: "1.2"
+version: "1.3"
 gates:
   model_lift_ci_lo: 0.0        # lower CI bound of AUC minus best one-signal model must exceed this
   p_roi_positive: 0.5          # P(ROI > 0) must reach this
@@ -11,3 +12,4 @@ flags:
   temporal_degradation_upper: 0.03
   roi_p5: 0.0                  # 5th-percentile ROI below this trips roi_spans_negative
   false_alerts_per_100_vehicle_months_max: 25.0   # alert burden ceiling at the chosen operating point
+  learning_curve_gain_half_to_full: 0.01          # AUC gain from 50% to 100% of vehicles that counts as still rising

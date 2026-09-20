@@ -370,6 +370,36 @@ def build_brief(
                 I("cross_oem"),
             )
         )
+    lc, comp = E("learning_curve"), E("compute")
+    if lc and any(p_.get("auc") for p_ in lc["points"]):
+        curve = "; ".join(
+            f"{p_['fraction']:.0%} of vehicles ({p_['n_vehicles']:,}, {p_['n_pos']:,} pos) AUC {_ci(p_['auc'])}"
+            for p_ in lc["points"]
+            if p_.get("auc")
+        )
+        verdict_txt = (
+            f"still rising (+{lc['auc_gain_half_to_full']:.3f} from half to all vehicles): the AUC above is a lower bound of what more data would give"
+            if lc["still_improving"]
+            else f"flat ({lc['auc_gain_half_to_full']:+.3f} from half to all vehicles): the capability is data-saturated on this fleet"
+            if lc["auc_gain_half_to_full"] is not None
+            else "not resolvable on this fleet"
+        )
+        lines.append(
+            Line(
+                f"Learning curve on the sufficient set: {curve}; {verdict_txt}", I("learning_curve")
+            )
+        )
+    if comp:
+        served = comp["cache_hits"]
+        total = comp["cache_hits"] + comp["cache_misses"]
+        lines.append(
+            Line(
+                f"Compute: {total} out-of-fold fit sets requested, {served} served from the fit cache (bit-identical to a fresh fit), "
+                f"{comp['fold_workers']} fold workers x {comp['lgbm_threads']} threads"
+                + ("" if comp["cache_enabled"] else "; cache bypassed (replay)"),
+                I("compute"),
+            )
+        )
     sections.append(Section(title="Robustness", lines=tuple(lines)))
 
     # --------------------------------------------------------------- economics

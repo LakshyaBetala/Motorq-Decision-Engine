@@ -29,6 +29,7 @@ from motorq_de.harness.experiments import (
     ablation,
     cross_oem_validation,
     feature_analysis,
+    learning_curve,
     model_comparison,
     redundancy,
     temporal_validation,
@@ -426,6 +427,33 @@ class Runner:
                 },
                 ev,
             )
+        # was this much data needed: AUC of the sufficient set on nested vehicle subsets
+        self._rec(
+            run_id,
+            "EXPERIMENT",
+            "learning_curve",
+            "learning_curve",
+            {"signals": suff},
+            seed,
+            lambda: learning_curve(self.store, spec, suff),
+            ev,
+        )
+        # what the study cost to compute, and how much of it was served from the fit cache
+        self._rec(
+            run_id,
+            "EXPERIMENT",
+            "compute",
+            "compute",
+            {"cache_enabled": self.store.fits.enabled},
+            seed,
+            lambda: {
+                **self.store.fits.stats(),
+                "cache_enabled": self.store.fits.enabled,
+                "fold_workers": runtime.cv_parallelism(5)[0],
+                "lgbm_threads": runtime.cv_parallelism(5)[1],
+            },
+            ev,
+        )
         self.ledger.end_step(sid, note=";".join(replans) or None)
         return suff
 
@@ -712,7 +740,13 @@ class Runner:
                 f"replay needs dataset {parent['dataset_hash']}, runner has {self.source.dataset_hash}"
             )
         spec = ProblemSpec.model_validate(parent["spec"])
-        res = self.run(spec, kind="replay", derived_from=parent_run_id)
+        # a replay must recompute: the fit cache is bypassed for its duration
+        was_enabled = self.store.fits.enabled
+        self.store.fits.enabled = False
+        try:
+            res = self.run(spec, kind="replay", derived_from=parent_run_id)
+        finally:
+            self.store.fits.enabled = was_enabled
         before = self.ledger.evidence_objects(parent_run_id)
         diff = diff_evidence(before, res.evidence)
         if "runtime" in before and "runtime" in res.evidence:
@@ -734,6 +768,10 @@ class Runner:
 
 
 PROVENANCE_KEYS = frozenset({"evidence_ids", "evidence_id", "run_id"})
+# operational records: how the study was computed, not what it found. They differ between a
+# run and its replay by construction (cache bypassed, thread counts) and are reported, not
+# compared; the numeric environment is compared separately via `environment_identical`
+INFORMATIONAL_RECORDS = frozenset({"compute", "runtime"})
 
 
 def _substance(x: Any) -> Any:
@@ -761,6 +799,9 @@ def diff_evidence(a: dict[str, Evidence], b: dict[str, Evidence]) -> dict[str, A
         oa, ob = _substance(a[n].outputs), _substance(b[n].outputs)
         same = oa == ob
         paths = [] if same else _first_diffs(oa, ob)
+        if n in INFORMATIONAL_RECORDS:
+            rows.append({"name": n, "status": "informational", "paths": paths})
+            continue
         if not same:
             identical = False
         rows.append({"name": n, "status": "identical" if same else "differs", "paths": paths})

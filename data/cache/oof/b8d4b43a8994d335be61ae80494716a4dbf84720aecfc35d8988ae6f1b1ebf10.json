@@ -1,0 +1,1 @@
+{"model": "lightgbm", "seed": 42, "signals": ["fuel_consumed_gal", "charge_energy_kwh", "brake_wear_est_rear_pct", "parking_variability_score"]}

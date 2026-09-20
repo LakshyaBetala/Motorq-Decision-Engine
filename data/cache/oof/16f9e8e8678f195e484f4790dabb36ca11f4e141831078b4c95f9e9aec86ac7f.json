@@ -1,0 +1,1 @@
+{"model": "lightgbm", "seed": 42, "signals": ["brake_pad_wear_pct", "dtc_brake_family", "co2_kg", "charge_events_count", "brake_wear_est_rear_pct", "parking_variability_score"]}

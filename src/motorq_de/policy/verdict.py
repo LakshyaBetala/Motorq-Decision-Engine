@@ -19,6 +19,8 @@
       cost_placeholders       run cost rests on placeholder unit prices (always true until
                               Motorq's contracted rates replace the price sheet)
       alert_burden            false-alert episodes per 100 vehicle-months above the ceiling
+      data_still_improving    learning curve still rising from half to all vehicles (more data
+                              would raise the AUC; the reported figure is a lower bound)
 
 Thresholds live in policy.yaml (versioned); the brief stamps the version.
 
@@ -220,6 +222,23 @@ def decide(spec: ProblemSpec, ev: EvidenceBundle) -> Verdict:
                 evidence_ids=ab_ids,
                 note="an accepted removal could not be resolved to tolerance/2; more positives needed"
                 if ab.get("underpowered")
+                else "",
+            )
+        )
+
+    lc, lc_ids = ev.get("learning_curve")
+    if lc:
+        gain = lc.get("auc_gain_half_to_full")
+        rising = gain is not None and gain > THRESHOLDS["learning_curve_gain_half_to_full"]
+        flags.append(
+            FlagResult(
+                name="data_still_improving",
+                tripped=bool(rising),
+                value=gain,
+                threshold=THRESHOLDS["learning_curve_gain_half_to_full"],
+                evidence_ids=lc_ids,
+                note="AUC still rising from half to all vehicles; the reported AUC is a lower bound"
+                if rising
                 else "",
             )
         )

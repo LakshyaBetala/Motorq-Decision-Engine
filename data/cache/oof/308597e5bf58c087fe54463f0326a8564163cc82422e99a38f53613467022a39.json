@@ -1,0 +1,1 @@
+{"model": "lightgbm", "seed": 42, "signals": ["gps_lon_mean", "gps_fix_count", "trip_count", "trip_duration_min", "brake_pad_wear_pct", "brake_pad_wear_rear_pct", "engine_hours_delta", "dtc_brake_family", "co2_kg", "brake_wear_est_rear_pct", "radio_volume_mean"]}

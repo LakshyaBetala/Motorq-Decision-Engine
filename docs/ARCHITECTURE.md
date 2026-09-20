@@ -274,9 +274,10 @@ Gates (any failure -> NOT_FEASIBLE), flags (any trip -> PILOT instead of BUILD_R
 | cost | marginal monthly run cost <= `max_run_cost_usd_month` | the request; the gate exists only when a ceiling is stated |
 | delivery | a deployment pattern meets `max_latency_s` | the request |
 
-Nine flags: cross-OEM variance, temporal degradation, ROI tail negative, value assumptions
+Ten flags: cross-OEM variance, temporal degradation, ROI tail negative, value assumptions
 unvalidated by a pilot, short signal history, ablation underpowered, suspicious signals
-(leakage tier 2 or quality flags on the sufficient set), cost placeholders, alert burden.
+(leakage tier 2 or quality flags on the sufficient set), cost placeholders, alert burden,
+data still improving (learning curve).
 
 **Are the gates dynamic?** In three ways, and deliberately not in a fourth:
 
@@ -327,7 +328,34 @@ operational check after any upgrade.
 
 ---
 
-## 8. What is still needed
+## 8. Compute: what is trained, when, and on how much data
+
+**Is the model retrained for every decision?** Every *study* trains from scratch on the
+class-weighted sample of vehicle-days (up to 150,000 rows), because a feasibility verdict must
+be reproducible from the data alone. But a study is not a production scorer: it decides once
+whether a capability is worth building; the deployed model that scores vehicles daily is a
+separate artefact, built from the study's sufficient set, and retrained on a schedule.
+
+**Was that much data needed?** The learning curve (`experiments.learning_curve`) refits the
+sufficient set on nested subsets of 25 / 50 / 75 / 100 % of vehicles and reports the AUC with
+its interval at each point. Rising from half to all vehicles by more than 0.01 AUC trips the
+`data_still_improving` flag: the reported AUC is then a lower bound of what more history or
+more vehicles would give. Flat means the capability is data-saturated on this fleet and the
+remaining uncertainty is about value, not signal. On the 600-vehicle fixture the curve is
+0.798 -> 0.847 -> 0.853 -> 0.859 (still rising); the 5,000-vehicle fleet is where it flattens.
+
+**No duplicate fits.** Fits are keyed by everything that determines their output (row
+identity, ordered signal set, model, fold count, seed, numeric environment) in a fit cache
+(`harness/fitcache.py`). A hit is bit-identical to a fresh fit. Measured on the fixture: a
+cold study requested 60 out-of-fold fit sets of which 34 were duplicates served from the
+cache (model comparison and the cadence ablation re-fitting sets the main ablation had
+already fitted), 166 s; the same study warm took 101 s with all 60 served; evidence identical.
+Replay bypasses the cache because its job is to recompute; in the replay diff the `compute`
+and `runtime` records are reported as informational rather than compared (they differ by
+construction), while the numeric environment is compared separately. The brief's Compute
+line and the dashboard's Runtime panel show hits and misses per run.
+
+## 9. What is still needed
 
 1. A run against Motorq's Snowflake through `SnowflakeSource` (the adapter and its contract
    validation are ready; credentials are not).

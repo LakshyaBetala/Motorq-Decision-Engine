@@ -1,0 +1,1 @@
+{"model": "logistic", "seed": 42, "signals": ["brake_pad_wear_pct", "dtc_brake_family", "co2_kg", "charge_events_count", "parking_variability_score"]}

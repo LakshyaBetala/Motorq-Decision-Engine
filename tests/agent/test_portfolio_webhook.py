@@ -52,7 +52,7 @@ def _verdict(decision):
                 evidence_ids=(),
             ),
         ),
-        policy_version="1.1",
+        policy_version="1.3",
     )
 
 

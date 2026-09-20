@@ -35,8 +35,14 @@ def bundle(
     underpowered=False,
     suspicious=(),
     placeholders=(),
+    lc_gain=0.002,
 ):
     ev = EvidenceBundle()
+    ev.put(
+        "learning_curve",
+        {"auc_gain_half_to_full": lc_gain, "still_improving": lc_gain > 0.01},
+        "ev_lc",
+    )
     ev.put("coverage_sufficient", {"fleet_share_full_set": share}, "ev_cov")
     ev.put(
         "model_comparison",
@@ -135,6 +141,7 @@ def test_gate_boundaries_inclusive_exclusive():
         ({"underpowered": True}, "ablation_underpowered"),
         ({"suspicious": ("a",)}, "suspicious_signals"),
         ({"placeholders": ("oem_data",)}, "cost_placeholders"),
+        ({"lc_gain": 0.02}, "data_still_improving"),
     ],
 )
 def test_each_flag_trips_to_pilot(kw, flag):
@@ -165,7 +172,7 @@ def test_thresholds_are_reported_on_results():
 def test_policy_thresholds_come_from_yaml():
     from motorq_de.policy.verdict import POLICY_VERSION
 
-    assert POLICY_VERSION == "1.2"
+    assert POLICY_VERSION == "1.3"
     assert THRESHOLDS["false_alerts_per_100_vehicle_months_max"] == 25.0
 
 

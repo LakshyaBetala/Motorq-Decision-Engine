@@ -20,6 +20,7 @@ import pandas as pd
 from sklearn.feature_selection import mutual_info_classif
 
 from motorq_de.harness import stats
+from motorq_de.harness.fitcache import FitCache
 from motorq_de.harness.frames import FeatureStore, Matrix
 from motorq_de.harness.models import (
     fit_predict,
@@ -155,6 +156,12 @@ def feature_analysis(
             for sid, d in drops.items():
                 perm_drops[sid].append(d)
         oofs.append(oof)
+        if r == 0:
+            store.fits.put(
+                FitCache.key(M.row_key, M.signals, "lightgbm", N_SPLITS, seed),
+                oof,
+                {"signals": list(M.signals), "model": "lightgbm", "seed": seed},
+            )
     auc_ci = stats.cluster_bootstrap_auc(M.y, oofs[0], M.groups, M.w, BOOT_B, seed)
     repeat_aucs = [stats.fast_auc(M.y, o, M.w) for o in oofs]
 
@@ -242,9 +249,7 @@ def ablation(
     kept = [s for s in signals if s not in set(screened_out)]
     M_full = store.matrix(spec, signals).select(kept)
     order = [s for s in order_all if s in set(M_full.signals)]
-    s_full = oof_predictions(
-        "lightgbm", M_full.X, M_full.y, M_full.w, M_full.groups, N_SPLITS, seed
-    )
+    s_full = store.oof("lightgbm", M_full, seed, N_SPLITS)
     full_auc = stats.cluster_bootstrap_auc(M_full.y, s_full, M_full.groups, M_full.w, BOOT_B, seed)
 
     current = list(M_full.signals)
@@ -271,7 +276,7 @@ def ablation(
             break
         candidate = [s for s in current if s != sid]
         M = M_full.select(candidate)
-        s_red = oof_predictions("lightgbm", M.X, M.y, M.w, M.groups, N_SPLITS, seed)
+        s_red = store.oof("lightgbm", M, seed, N_SPLITS)
         n_fits += N_SPLITS
         auc_red = stats.cluster_bootstrap_auc(M.y, s_red, M.groups, M.w, BOOT_B, seed)
         delta = stats.paired_bootstrap_delta_auc(
@@ -521,6 +526,89 @@ def redundancy(
     }
 
 
+LEARNING_CURVE_FRACTIONS = (0.25, 0.5, 0.75, 1.0)
+LEARNING_CURVE_RISING = 0.01  # AUC gain from half the vehicles to all of them
+
+
+def learning_curve(
+    store: FeatureStore,
+    spec: ProblemSpec,
+    signals: list[str],
+    fractions: tuple[float, ...] = LEARNING_CURVE_FRACTIONS,
+) -> dict[str, Any]:
+    """Was this much data needed, and would more help? Out-of-fold AUC of the sufficient set
+    on nested subsets of VEHICLES (not rows: a vehicle's days are not independent). A curve
+    that is still rising between half and all of the fleet means the reported AUC is a lower
+    bound of what more history or more vehicles would give; a flat curve means the
+    capability is data-saturated and the remaining uncertainty is about value, not signal."""
+    seed = spec.seed
+    M = store.matrix(spec, signals)
+    rng = np.random.default_rng(seed)
+    vehicles = np.unique(M.groups)
+    order = rng.permutation(vehicles)
+    points = []
+    for f in fractions:
+        take = set(order[: max(int(round(f * len(vehicles))), 1)].tolist())
+        rows = np.flatnonzero(np.isin(M.groups, list(take)))
+        sub = Matrix(
+            X=M.X[rows],
+            y=M.y[rows],
+            w=M.w[rows],
+            groups=M.groups[rows],
+            oem=M.oem[rows],
+            dates=M.dates[rows],
+            days_to_event=M.days_to_event[rows],
+            feature_names=M.feature_names,
+            signal_of=M.signal_of,
+            signals=M.signals,
+            neg_sampling_fraction=M.neg_sampling_fraction,
+            n_pos_total=M.n_pos_total,
+            n_neg_total=M.n_neg_total,
+            row_key=M.row_key if f == 1.0 else "",
+        )
+        n_pos = int(sub.y.sum())
+        if n_pos < 20 or len(np.unique(sub.groups)) < N_SPLITS:
+            points.append(
+                {
+                    "fraction": f,
+                    "n_vehicles": len(take),
+                    "n_rows": int(len(rows)),
+                    "n_pos": n_pos,
+                    "auc": None,
+                }
+            )
+            continue
+        oof = (
+            store.oof("lightgbm", sub, seed, N_SPLITS)
+            if f == 1.0
+            else oof_predictions("lightgbm", sub.X, sub.y, sub.w, sub.groups, N_SPLITS, seed)
+        )
+        ci = stats.cluster_bootstrap_auc(sub.y, oof, sub.groups, sub.w, BOOT_B, seed)
+        points.append(
+            {
+                "fraction": f,
+                "n_vehicles": len(take),
+                "n_rows": int(len(rows)),
+                "n_pos": n_pos,
+                "auc": ci.as_dict(),
+            }
+        )
+    by_f = {p_["fraction"]: p_ for p_ in points if p_["auc"]}
+    gain = (
+        by_f[1.0]["auc"]["point"] - by_f[0.5]["auc"]["point"]
+        if 1.0 in by_f and 0.5 in by_f
+        else None
+    )
+    return {
+        **_summary(M),
+        "fractions": list(fractions),
+        "points": points,
+        "auc_gain_half_to_full": None if gain is None else round(float(gain), 6),
+        "still_improving": bool(gain is not None and gain > LEARNING_CURVE_RISING),
+        "rising_threshold": LEARNING_CURVE_RISING,
+    }
+
+
 def model_comparison(
     store: FeatureStore,
     spec: ProblemSpec,
@@ -539,7 +627,7 @@ def model_comparison(
             "models": {},
         }
         for model in models:
-            oof = oof_predictions(model, M.X, M.y, M.w, M.groups, N_SPLITS, seed)
+            oof = store.oof(model, M, seed, N_SPLITS)
             ci = stats.cluster_bootstrap_auc(M.y, oof, M.groups, M.w, BOOT_B, seed)
             entry["models"][model] = {
                 "auc": ci.as_dict(),
@@ -558,7 +646,7 @@ def model_comparison(
         single: dict[str, dict[str, Any]] = {}
         for s in cands:
             S = M.select([s])
-            oof_s = oof_predictions("lightgbm", S.X, S.y, S.w, S.groups, N_SPLITS, seed)
+            oof_s = store.oof("lightgbm", S, seed, N_SPLITS)
             single[s] = {
                 "auc": stats.cluster_bootstrap_auc(
                     S.y, oof_s, S.groups, S.w, BOOT_B, seed
@@ -579,8 +667,8 @@ def model_comparison(
     paired = None
     if len(names) >= 2:
         A, B_ = M_all.select(signal_sets[names[0]]), M_all.select(signal_sets[names[1]])
-        sa = oof_predictions("lightgbm", A.X, A.y, A.w, A.groups, N_SPLITS, seed)
-        sb = oof_predictions("lightgbm", B_.X, B_.y, B_.w, B_.groups, N_SPLITS, seed)
+        sa = store.oof("lightgbm", A, seed, N_SPLITS)
+        sb = store.oof("lightgbm", B_, seed, N_SPLITS)
         d = stats.paired_bootstrap_delta_auc(A.y, sb, sa, A.groups, A.w, BOOT_B, seed)
         paired = {"a": names[0], "b": names[1], "delta_auc_b_minus_a": d.as_dict()}
     return {**_summary(M_all), "sets": results, "paired": paired}
