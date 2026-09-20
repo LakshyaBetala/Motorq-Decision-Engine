@@ -3,13 +3,25 @@ import Link from "next/link";
 import { useEffect } from "react";
 
 /** Citation chips: every number on the page resolves to one of these. */
-export function Cite({ ids, onOpen }: { ids: string[]; onOpen: (id: string) => void }) {
-  if (!ids?.length) return null;
+/** A citation is a link into the ledger. It reads "source" so the prose stays legible; the
+ *  evidence id itself is in the tooltip and in the drawer it opens. */
+export function Cite({ ids, onOpen, full = false }: { ids: string[]; onOpen: (id: string) => void; full?: boolean }) {
+  const list = Array.from(new Set((ids ?? []).filter(Boolean)));
+  if (!list.length) return null;
+  if (full) {
+    return (
+      <span className="ml-1 inline-flex flex-wrap gap-1 align-middle">
+        {list.map((id) => (
+          <button key={id} className="cite" onClick={() => onOpen(id)} title="Open the stored tool call">{id}</button>
+        ))}
+      </span>
+    );
+  }
   return (
     <span className="ml-1 inline-flex flex-wrap gap-1 align-middle">
-      {ids.map((id) => (
-        <button key={id} className="cite" onClick={() => onOpen(id)} title="Open the stored tool call">
-          {id}
+      {list.map((id, i) => (
+        <button key={id} className="cite" onClick={() => onOpen(id)} title={`Open the stored tool call ${id}`}>
+          {list.length === 1 ? "source" : `source ${i + 1}`}
         </button>
       ))}
     </span>
