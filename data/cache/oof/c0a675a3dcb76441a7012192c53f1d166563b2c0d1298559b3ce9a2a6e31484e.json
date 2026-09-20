@@ -1,1 +1,0 @@
-{"model": "lightgbm", "seed": 42, "signals": ["brake_pad_wear_pct", "brake_pad_wear_rear_pct", "oil_life_pct", "air_filter_life_pct", "fuel_consumed_gal", "co2_kg", "charge_energy_kwh", "brake_wear_est_rear_pct", "pad_thickness_proxy_mm", "parking_variability_score"]}

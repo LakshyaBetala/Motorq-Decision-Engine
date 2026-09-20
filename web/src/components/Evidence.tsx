@@ -156,3 +156,111 @@ export function RuntimeCompute({ rt, comp }: { rt: any; comp: any }) {
     </dl>
   );
 }
+
+// ---------------------------------------------------------------- tuning headroom
+export function TuningHeadroom({ th }: { th: any }) {
+  const rows = Object.entries(th.variants ?? {}) as [string, any][];
+  if (!rows.length) return <p className="text-xs text-ink-500">No grid was run.</p>;
+  const fmt = (x: number) => `${x >= 0 ? "+" : ""}${x.toFixed(3)}`;
+  return (
+    <div className="text-sm">
+      <table className="w-full text-[12px]">
+        <thead className="text-left text-ink-500">
+          <tr><th className="font-medium">configuration</th><th className="text-right font-medium">AUC</th><th className="text-right font-medium">vs default</th><th className="text-right font-medium">95% CI</th></tr>
+        </thead>
+        <tbody>
+          <tr className="border-t border-ink-300/50">
+            <td className="mono">default <span className="text-ink-500">(used for the verdict)</span></td>
+            <td className="num text-right">{th.default_auc.point.toFixed(3)}</td>
+            <td className="num text-right text-ink-400">—</td>
+            <td className="num text-right text-ink-400">—</td>
+          </tr>
+          {rows.map(([name, r]) => (
+            <tr key={name} className={`border-t border-ink-300/50 ${name === th.best_variant ? "text-ink-950" : "text-ink-700"}`}>
+              <td className="mono">{name}{name === th.best_variant && <span className="ml-1 text-ink-500">best</span>}</td>
+              <td className="num text-right">{r.auc.point.toFixed(3)}</td>
+              <td className="num text-right">{fmt(r.delta_vs_default.point)}</td>
+              <td className="num text-right text-ink-500">{fmt(r.delta_vs_default.lo)} to {fmt(r.delta_vs_default.hi)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="mt-2 text-xs text-ink-500">
+        {th.loose_lower_bound
+          ? `A fixed grid moves the AUC by ${fmt(th.headroom)} with the whole interval above ${th.headroom_threshold}: the reported AUC is a loose lower bound.`
+          : `Nothing in the grid beats the default beyond noise (best ${fmt(th.headroom)}, interval reaching ${fmt(th.headroom_lo)}): the fixed configuration is not leaving signal on the table.`}{" "}
+        Best-of-grid is picked on the evaluation folds, so it is an optimistic bound. The verdict always uses the default so studies stay comparable.
+      </p>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- seed stability
+export function SeedStability({ ss }: { ss: any }) {
+  const rows: { seed: number; auc: number }[] = ss.per_seed ?? [];
+  if (!rows.length) return null;
+  const aucs = rows.map((r) => r.auc);
+  const lo = Math.min(...aucs), hi = Math.max(...aucs);
+  const pad = Math.max(ss.spread_threshold, (hi - lo) * 0.5, 0.002);
+  const a0 = lo - pad, a1 = hi + pad;
+  const x = (v: number) => ((v - a0) / (a1 - a0)) * 100;
+  return (
+    <div className="text-sm">
+      <div className="relative mt-3 h-8">
+        <div className="absolute left-0 right-0 top-1/2 h-px bg-ink-300" />
+        {/* tolerance band around the mean */}
+        <div className="absolute top-[9px] h-[14px] rounded-sm bg-ink-200/70" style={{ left: `${x(ss.auc_mean - ss.spread_threshold / 2)}%`, width: `${x(ss.auc_mean + ss.spread_threshold / 2) - x(ss.auc_mean - ss.spread_threshold / 2)}%` }} title={`tolerance ${ss.spread_threshold}`} />
+        {rows.map((r) => (
+          <span key={r.seed} className={`absolute top-1/2 h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white ${ss.seed_sensitive ? "bg-verdict-pilot" : "bg-ink-900"}`} style={{ left: `${x(r.auc)}%` }} title={`seed ${r.seed}: ${r.auc.toFixed(4)}`} />
+        ))}
+      </div>
+      <div className="num flex justify-between text-[11px] text-ink-500"><span>{a0.toFixed(3)}</span><span>{a1.toFixed(3)}</span></div>
+      <p className="mt-2 text-xs text-ink-500">
+        Sufficient-set AUC under {rows.length} fold assignments: {aucs.map((a) => a.toFixed(4)).join(", ")}; spread <span className="num">{ss.auc_spread.toFixed(4)}</span> against a tolerance of {ss.spread_threshold} (the shaded band).{" "}
+        {ss.seed_sensitive
+          ? "Wider than the ablation tolerance: read the sufficient set as one of several equivalent choices."
+          : "The answer does not depend on how the vehicles were split."}
+      </p>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- policy sensitivity
+export function PolicyMargins({ ps }: { ps: any }) {
+  type Row = { name: string; ok: boolean; margin_steps: number | null; margin: number | null; kind: "gate" | "flag" };
+  const rows: Row[] = [
+    ...(ps.gates ?? []).map((g: any) => ({ name: g.name, ok: g.passed, margin_steps: g.margin_steps, margin: g.margin, kind: "gate" as const })),
+    ...(ps.flags ?? []).map((f: any) => ({ name: f.name, ok: !f.tripped, margin_steps: f.margin_steps, margin: f.margin, kind: "flag" as const })),
+  ].filter((r) => r.margin_steps != null);
+  const cap = 6; // bars saturate at six steps; the number still says the exact figure
+  const w = (m: number) => `${(Math.min(Math.abs(m), cap) / cap) * 50}%`;
+  const against = ps.one_step_against, favour = ps.one_step_in_favour;
+  return (
+    <div className="text-sm">
+      <ul className="space-y-1.5">
+        {rows.map((r) => {
+          const m = r.margin_steps as number;
+          const color = m >= 0 ? (r.kind === "gate" ? "bg-verdict-build" : "bg-ink-400") : r.kind === "gate" ? "bg-verdict-no" : "bg-verdict-pilot";
+          return (
+            <li key={`${r.kind}-${r.name}`} className="grid grid-cols-[minmax(0,10rem)_1fr_3.5rem] items-center gap-x-3 text-[12px]">
+              <span className="truncate text-ink-900">{r.name.replaceAll("_", " ")}<span className="ml-1 text-ink-400">{r.kind}</span></span>
+              <span className="relative block h-3">
+                <span className="absolute inset-y-0 left-1/2 w-px bg-ink-900" />
+                <span className={`absolute inset-y-[3px] rounded-sm ${color}`} style={m >= 0 ? { left: "50%", width: w(m) } : { right: "50%", width: w(m) }} />
+              </span>
+              <span className={`num text-right ${m >= 0 ? "text-ink-700" : r.kind === "gate" ? "text-verdict-no" : "text-verdict-pilot"}`}>{m >= 0 ? "+" : ""}{m.toFixed(1)}</span>
+            </li>
+          );
+        })}
+      </ul>
+      <p className="mt-2 text-xs text-ink-500">
+        Distance from each threshold in policy steps (one step is the change to a threshold a reviewer would consider; the sizes are in policy.yaml). Left of the line is the failing or tripped side.
+        {ps.binding_gate && <> The binding gate is <span className="mono">{ps.binding_gate}</span>.</>}
+      </p>
+      <p className="mt-1 text-xs text-ink-700">
+        Every threshold one step against the capability: <span className="font-medium">{against.decision.replaceAll("_", " ")}</span>{against.changed.length > 0 && <span className="text-ink-500"> ({against.changed.join(", ")} change)</span>}. One step in its favour: <span className="font-medium">{favour.decision.replaceAll("_", " ")}</span>{favour.changed.length > 0 && <span className="text-ink-500"> ({favour.changed.join(", ")} change)</span>}.{" "}
+        {ps.robust ? "The verdict does not hinge on any single threshold choice." : "The verdict is within one step of a threshold; read the margins before acting on it."}
+      </p>
+    </div>
+  );
+}

@@ -1,1 +1,0 @@
-{"model": "lightgbm", "seed": 42, "signals": ["trip_count", "trip_duration_min", "brake_pad_wear_pct", "brake_pad_wear_rear_pct", "dtc_brake_family", "dtc_powertrain_family", "ldw_events", "brake_wear_est_rear_pct"]}

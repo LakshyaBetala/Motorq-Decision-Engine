@@ -67,3 +67,22 @@ def test_new_endpoints_validate(client):
     assert c.get("/runs/nope/brief.md").status_code == 404
     p = c.get("/portfolio").json()
     assert p["n_capabilities"] == 0 and p["cogs"]["n_catalog"] >= 85
+
+
+def test_api_key_guards_every_route_but_health(client, monkeypatch):
+    c, _ = client
+    monkeypatch.setenv("MDE_API_KEY", "s3cret")
+    assert c.get("/health").status_code == 200
+    assert c.get("/health").json()["auth_required"] is True
+    assert c.get("/runs").status_code == 401
+    assert c.get("/runs", headers={"authorization": "Bearer wrong"}).status_code == 401
+    assert c.get("/runs", headers={"authorization": "Bearer s3cret"}).status_code == 200
+    assert c.get("/runs", headers={"x-api-key": "s3cret"}).status_code == 200
+    assert c.post("/runs", json={}, headers={"authorization": "Bearer s3cret"}).status_code == 400
+
+
+def test_api_is_open_when_no_key_is_configured(client, monkeypatch):
+    c, _ = client
+    monkeypatch.delenv("MDE_API_KEY", raising=False)
+    assert c.get("/runs").status_code == 200
+    assert c.get("/health").json()["auth_required"] is False

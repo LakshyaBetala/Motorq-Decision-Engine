@@ -32,11 +32,13 @@ from motorq_de.harness.experiments import (
     learning_curve,
     model_comparison,
     redundancy,
+    seed_stability,
     temporal_validation,
+    tuning_headroom,
 )
 from motorq_de.harness.frames import FeatureStore
 from motorq_de.ledger.store import Ledger
-from motorq_de.policy.verdict import EvidenceBundle, decide
+from motorq_de.policy.verdict import EvidenceBundle, decide, sensitivity
 from motorq_de.quality.checks import (
     coverage_report,
     event_rate,
@@ -61,6 +63,8 @@ POLICY_INPUTS = (
     "leakage",
     "cost_sufficient",
     "operating_point",
+    "learning_curve",
+    "seed_stability",
 )
 
 
@@ -438,6 +442,28 @@ class Runner:
             lambda: learning_curve(self.store, spec, suff),
             ev,
         )
+        # how loose is the lower bound: a fixed hyper-parameter grid on the sufficient set
+        self._rec(
+            run_id,
+            "EXPERIMENT",
+            "tuning_headroom",
+            "tuning_headroom",
+            {"signals": suff},
+            seed,
+            lambda: tuning_headroom(self.store, spec, suff),
+            ev,
+        )
+        # would a different fold assignment have told a different story
+        self._rec(
+            run_id,
+            "EXPERIMENT",
+            "seed_stability",
+            "seed_stability",
+            {"signals": suff},
+            seed,
+            lambda: seed_stability(self.store, spec, suff),
+            ev,
+        )
         # what the study cost to compute, and how much of it was served from the fit cache
         self._rec(
             run_id,
@@ -506,8 +532,8 @@ class Runner:
                 ev,
             )
         lg = cmp["sets"]["sufficient"]["models"]["lightgbm"]
-        # recall uncertainty proxy: AUC CI half-width scaled; a direct recall bootstrap is a
-        # later refinement
+        # recall uncertainty: each operating point carries a cluster-bootstrap CI of event
+        # recall; the AUC-width proxy below is only used for rows that lack one
         rec_hw = (lg["auc"]["hi"] - lg["auc"]["lo"]) / 2 * 1.5
         insp = Range(**prices["operations"]["inspection_cost_per_alert"])
         op = self._rec(
@@ -532,9 +558,9 @@ class Runner:
         )
         ch = op["chosen"]
         recall = Range(
-            low=max(0.0, ch["recall"] - rec_hw),
+            low=ch.get("recall_lo", max(0.0, ch["recall"] - rec_hw)),
             base=ch["recall"],
-            high=min(1.0, ch["recall"] + rec_hw),
+            high=ch.get("recall_hi", min(1.0, ch["recall"] + rec_hw)),
         )
         fa_rate = ch.get("false_alerts_per_100_vehicle_months")
         args = (
@@ -635,6 +661,18 @@ class Runner:
             {"policy_version": verdict.policy_version},
             spec.seed,
             lambda: json.loads(verdict.model_dump_json()),
+            ev,
+        )
+        # how far each gate and flag sits from its threshold, and whether the verdict
+        # survives every threshold moving one step against it
+        self._rec(
+            run_id,
+            "POLICY",
+            "policy_sensitivity",
+            "policy_sensitivity",
+            {"policy_version": verdict.policy_version, "verdict": ev["verdict"].evidence_id},
+            spec.seed,
+            lambda: sensitivity(spec, bundle),
             ev,
         )
         self.ledger.end_step(sid, note=verdict.decision)

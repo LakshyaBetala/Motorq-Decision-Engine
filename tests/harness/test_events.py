@@ -58,3 +58,44 @@ def test_weights_correct_for_negative_downsampling():
     b = event_level_metrics(y, s, w3, v, dates, days_to, 7, alert_rate=0.5)
     assert a["event_recall"] == b["event_recall"] == 1.0
     assert b["false_alerts_per_100_vehicle_months"] > 0
+
+
+def test_event_recall_ci_brackets_the_point_and_is_deterministic():
+    from motorq_de.harness.stats import event_recall_ci
+
+    # 40 vehicles, one event each; the model catches exactly 30 of them
+    rows = []
+    for v in range(40):
+        for d in range(0, 15):
+            dt = 10 - d
+            y = 1 if 0 < dt <= 7 else 0
+            rows.append((v, d, y, float(dt) if dt > 0 else np.nan))
+    v = np.array([r[0] for r in rows])
+    dates = np.array([np.datetime64("2025-01-01") + r[1] for r in rows])
+    y = np.array([r[2] for r in rows])
+    days_to = np.array([r[3] for r in rows])
+    s = np.where((y == 1) & (v < 30), 0.9, 0.1).astype(float)
+    w = np.ones_like(s)
+    ci = event_recall_ci(y, s, w, v, dates, days_to, alert_rate=(30 * 7) / len(y), B=200, seed=3)
+    assert ci.point == 0.75
+    assert ci.lo < 0.75 < ci.hi
+    assert 0.55 < ci.lo and ci.hi < 0.95  # 40 clusters: a real, finite interval
+    again = event_recall_ci(y, s, w, v, dates, days_to, alert_rate=(30 * 7) / len(y), B=200, seed=3)
+    assert (again.lo, again.hi) == (ci.lo, ci.hi)
+
+
+def test_event_recall_ci_is_nan_without_events():
+    from motorq_de.harness.stats import event_recall_ci
+
+    y = np.zeros(10, dtype=int)
+    s = np.linspace(0, 1, 10)
+    ci = event_recall_ci(
+        y,
+        s,
+        np.ones(10),
+        np.arange(10),
+        np.arange(10).astype("datetime64[D]"),
+        np.full(10, np.nan),
+        0.2,
+    )
+    assert np.isnan(ci.point)

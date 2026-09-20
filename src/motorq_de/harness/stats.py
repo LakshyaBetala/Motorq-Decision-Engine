@@ -215,6 +215,47 @@ def univariate_auc(y: np.ndarray, x: np.ndarray, w: np.ndarray | None = None) ->
 # ------------------------------------------------------------------ event-level metrics
 
 
+def _flag_top(s: np.ndarray, w: np.ndarray, alert_rate: float) -> np.ndarray:
+    """Boolean mask of the highest-scoring rows that make up `alert_rate` of the weighted
+    population."""
+    order = np.argsort(-s, kind="mergesort")
+    cw = np.cumsum(w[order]) / w.sum()
+    k = int(np.searchsorted(cw, alert_rate, side="right"))
+    flagged = np.zeros(len(s), dtype=bool)
+    flagged[order[: max(k, 1)]] = True
+    return flagged
+
+
+def _events(
+    y: np.ndarray,
+    flagged: np.ndarray,
+    groups: np.ndarray,
+    dates: np.ndarray,
+    days_to_event: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """One row per event (vehicle, event date): the vehicle, whether any vehicle-day in its
+    horizon window was flagged, and the lead time of the earliest flag (nan if none)."""
+    pos = (y == 1) & np.isfinite(days_to_event)
+    if not pos.any():
+        return np.array([], dtype=groups.dtype), np.array([], dtype=bool), np.array([])
+    event_date = dates[pos].astype("datetime64[D]") + days_to_event[pos].astype(int).astype(
+        "timedelta64[D]"
+    )
+    keys = [(int(g), str(d)) for g, d in zip(groups[pos], event_date, strict=True)]
+    caught: dict[tuple[int, str], bool] = {}
+    lead: dict[tuple[int, str], float] = {}
+    for key, f, d in zip(keys, flagged[pos], days_to_event[pos], strict=True):
+        caught[key] = caught.get(key, False) or bool(f)
+        if f:
+            lead[key] = max(lead.get(key, 0.0), float(d))
+    ks = list(caught)
+    return (
+        np.array([k[0] for k in ks]),
+        np.array([caught[k] for k in ks], dtype=bool),
+        np.array([lead.get(k, np.nan) for k in ks], dtype=float),
+    )
+
+
 def event_level_metrics(
     y: np.ndarray,
     s: np.ndarray,
@@ -235,30 +276,13 @@ def event_level_metrics(
                                         approximated as flagged negative vehicle-days / horizon
                                         (weighted for negative downsampling)
     """
-    order = np.argsort(-s, kind="mergesort")
-    cw = np.cumsum(w[order]) / w.sum()
-    k = int(np.searchsorted(cw, alert_rate, side="right"))
-    flagged = np.zeros(len(s), dtype=bool)
-    flagged[order[: max(k, 1)]] = True
-
-    pos = (y == 1) & np.isfinite(days_to_event)
-    if pos.any():
-        event_date = dates[pos].astype("datetime64[D]") + days_to_event[pos].astype(int).astype(
-            "timedelta64[D]"
-        )
-        keys = [(int(g), str(d)) for g, d in zip(groups[pos], event_date, strict=True)]
-        caught: dict[tuple[int, str], bool] = {}
-        lead: dict[tuple[int, str], float] = {}
-        for key, f, d in zip(keys, flagged[pos], days_to_event[pos], strict=True):
-            caught[key] = caught.get(key, False) or bool(f)
-            if f:
-                lead[key] = max(lead.get(key, 0.0), float(d))
-        n_events = len(caught)
-        n_caught = sum(caught.values())
-        event_recall = n_caught / n_events if n_events else float("nan")
-        median_lead = float(np.median(list(lead.values()))) if lead else float("nan")
-    else:
-        n_events, n_caught, event_recall, median_lead = 0, 0, float("nan"), float("nan")
+    flagged = _flag_top(s, w, alert_rate)
+    _, caught, lead = _events(y, flagged, groups, dates, days_to_event)
+    n_events = int(len(caught))
+    n_caught = int(caught.sum())
+    event_recall = n_caught / n_events if n_events else float("nan")
+    lead = lead[np.isfinite(lead)]
+    median_lead = float(np.median(lead)) if len(lead) else float("nan")
 
     neg = y == 0
     fa_days = float(np.sum(w[neg & flagged]))
@@ -266,11 +290,46 @@ def event_level_metrics(
     vehicle_months = float(np.sum(w)) / 30.44
     return {
         "alert_rate": float(np.sum(w[flagged]) / np.sum(w)),
-        "n_events": int(n_events),
-        "n_events_caught": int(n_caught),
+        "n_events": n_events,
+        "n_events_caught": n_caught,
         "event_recall": float(event_recall),
         "median_lead_days": median_lead,
         "false_alerts_per_100_vehicle_months": float(100.0 * fa_episodes / vehicle_months)
         if vehicle_months
         else float("nan"),
     }
+
+
+def event_recall_ci(
+    y: np.ndarray,
+    s: np.ndarray,
+    w: np.ndarray,
+    groups: np.ndarray,
+    dates: np.ndarray,
+    days_to_event: np.ndarray,
+    alert_rate: float,
+    B: int = 300,
+    seed: int = 0,
+) -> CI:
+    """Cluster-bootstrap CI of event-level recall at an alert rate. Vehicles are resampled
+    with replacement; an event counts as many times as its vehicle was drawn. This is the
+    recall uncertainty the ROI distribution consumes, measured directly rather than proxied
+    from the AUC interval."""
+    flagged = _flag_top(s, w, alert_rate)
+    ev_groups, caught, _ = _events(y, flagged, groups, dates, days_to_event)
+    if len(caught) == 0:
+        return CI(float("nan"), float("nan"), float("nan"))
+    point = float(caught.mean())
+    codes, uniq = _factorize(groups)
+    G = len(uniq)
+    ev_codes = np.searchsorted(uniq, ev_groups)
+    rng = np.random.default_rng(seed)
+    vals = np.empty(B)
+    for b in range(B):
+        count = np.bincount(rng.integers(0, G, G), minlength=G).astype(float)
+        c = count[ev_codes]
+        den = c.sum()
+        vals[b] = float((c * caught).sum() / den) if den > 0 else np.nan
+    vals = vals[np.isfinite(vals)]
+    lo, hi = np.percentile(vals, [2.5, 97.5]) if len(vals) else (point, point)
+    return CI(point, float(lo), float(hi))

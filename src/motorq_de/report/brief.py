@@ -389,6 +389,34 @@ def build_brief(
                 f"Learning curve on the sufficient set: {curve}; {verdict_txt}", I("learning_curve")
             )
         )
+    th, ss = E("tuning_headroom"), E("seed_stability")
+    if th and th.get("best_variant"):
+        d = th["variants"][th["best_variant"]]["delta_vs_default"]
+        lines.append(
+            Line(
+                f"Tuning headroom: best of a fixed {len(th['variants'])}-configuration LightGBM grid ({th['best_variant']}) moves the sufficient-set AUC by {d['point']:+.3f} (95% CI {d['lo']:+.3f} to {d['hi']:+.3f}) against the default {_ci(th['default_auc'])}; "
+                + (
+                    "the reported AUC is a loose lower bound"
+                    if th["loose_lower_bound"]
+                    else "within noise, so the fixed configuration is not leaving signal on the table"
+                )
+                + ". Best-of-grid is selected on the evaluation folds, so this is an optimistic bound; the verdict uses the default configuration",
+                I("tuning_headroom"),
+            )
+        )
+    if ss and ss.get("per_seed"):
+        seeds = ", ".join(f"{r['auc']:.3f}" for r in ss["per_seed"])
+        lines.append(
+            Line(
+                f"Seed stability: sufficient-set AUC under {len(ss['per_seed'])} fold assignments {seeds} (spread {ss['auc_spread']:.4f}, tolerance {ss['spread_threshold']}); "
+                + (
+                    "wider than the ablation tolerance, so the sufficient set should be read as one of several equivalent choices"
+                    if ss["seed_sensitive"]
+                    else "the answer does not depend on the fold assignment"
+                ),
+                I("seed_stability"),
+            )
+        )
     if comp:
         served = comp["cache_hits"]
         total = comp["cache_hits"] + comp["cache_misses"]
@@ -449,9 +477,16 @@ def build_brief(
                 f"; event-level: {ch['recall']:.3f} of events caught, median lead {_fmt(ch.get('median_lead_days'), 1)} days, "
                 f"{_fmt(ch.get('false_alerts_per_100_vehicle_months'), 1)} false-alert episodes per 100 vehicle-months"
             )
+        rec_ci = ""
+        if ch.get("recall_lo") is not None:
+            rec_ci = f"; recall interval {ch['recall_lo']:.3f} to {ch['recall_hi']:.3f} " + (
+                "(vehicle-cluster bootstrap of event recall)"
+                if ch.get("recall_ci_basis") == "bootstrap"
+                else "(proxy from the AUC interval)"
+            )
         lines.append(
             Line(
-                f"Operating point chosen to maximise median net value: alert on top {ch['alert_rate']:.2%} of vehicle-days -> precision {_fmt(ch.get('precision'))}{ev_bits}; median false-alert cost {_usd(ch['median_false_alert_cost_year'])}/yr",
+                f"Operating point chosen to maximise median net value: alert on top {ch['alert_rate']:.2%} of vehicle-days -> precision {_fmt(ch.get('precision'))}{ev_bits}{rec_ci}; median false-alert cost {_usd(ch['median_false_alert_cost_year'])}/yr",
                 I("operating_point"),
             )
         )
@@ -521,6 +556,30 @@ def build_brief(
     clean = [f.name for f in verdict.flags if not f.tripped]
     if clean:
         lines.append(Line("Flags not tripped: " + ", ".join(clean)))
+    ps = E("policy_sensitivity")
+    if ps:
+        near = [
+            f"{g['name']} {g['margin_steps']:+.1f} steps"
+            for g in ps["gates"]
+            if g.get("margin_steps") is not None
+        ]
+        against, favour = ps["one_step_against"], ps["one_step_in_favour"]
+        lines.append(
+            Line(
+                f"Sensitivity: gate margins {', '.join(near) or 'n/a'}"
+                + (f"; binding gate {ps['binding_gate']}" if ps.get("binding_gate") else "")
+                + f". With every threshold one step against the capability the decision is {against['decision']}"
+                + (f" ({', '.join(against['changed'])} change)" if against["changed"] else "")
+                + f"; one step in its favour, {favour['decision']}"
+                + (f" ({', '.join(favour['changed'])} change)" if favour["changed"] else "")
+                + (
+                    ". The verdict does not hinge on any single threshold choice"
+                    if ps["robust"]
+                    else ". The verdict is within one step of a threshold: read the margins before acting on it"
+                ),
+                I("policy_sensitivity"),
+            )
+        )
     sections.append(Section(title="Verdict", lines=tuple(lines)))
 
     return Brief(

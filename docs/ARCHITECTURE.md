@@ -241,6 +241,14 @@ event; a false-alert episode is a maximal run of consecutive alert days not foll
 event within *h*, counted per 100 vehicle-months. These are the quantities a fleet manager
 experiences, and the ones the economics use.
 
+**Recall uncertainty.** The ROI distribution needs recall as a range, not a point. At each
+alert rate the event-level recall gets its own vehicle-cluster bootstrap
+(`stats.event_recall_ci`): vehicles are resampled with replacement and an event counts as
+many times as its vehicle was drawn, 300 replicates, percentile interval. Before this the
+range was a proxy scaled from the AUC interval; the operating-point record now says which
+basis it used (`recall_ci_basis`), and older studies replayed through what-if fall back to
+the proxy.
+
 **Economics.** Inputs are ranges (low, base, high) drawn from a PERT distribution
 (Beta(1 + 4(b-l)/(h-l), 1 + 4(h-b)/(h-l)) scaled to [l, h]); 10,000 draws. Per draw:
 
@@ -290,6 +298,17 @@ data still improving (learning curve).
    a verdict that grades itself; the reproducibility contract requires the rule to be fixed
    before the evidence is seen.
 
+**How close was it?** Fixed thresholds invite the question "what if you had picked 0.55
+instead of 0.5". The POLICY stage answers it in a `policy_sensitivity` record
+(`verdict.sensitivity`): for every gate and flag the signed margin to its threshold, in
+units of a declared step (`policy.yaml: sensitivity_steps`, e.g. 0.05 for P(ROI > 0), 0.01
+AUC for the model lift), the *binding gate* (the passed gate with the smallest margin), and
+the decision recomputed twice with every stepped threshold moved one step against the
+capability and one step in its favour. `robust: true` means neither move changes the
+decision. Request constraints (coverage floor, cost ceiling, history months) are stepped
+too. The brief prints the line; the dashboard draws the margins. This is what makes the
+thresholds reviewable without making them adaptive.
+
 Accuracy of the verdict is only as good as the evidence: the oracle tests are what show the
 evidence is right on data with known answers, and the flags are how the policy says what it
 does not know.
@@ -326,6 +345,13 @@ only changes when the image does.
 suite before every push; the runtime line is printed in every brief; `mde run replay` is the
 operational check after any upgrade.
 
+**Determinism is not robustness.** The same seed always gives the same answer; that says
+nothing about whether a *different* seed would. `experiments.seed_stability` refits the
+sufficient set under three fold assignments and reports the AUC spread. A spread above the
+ablation tolerance (0.005) trips the `seed_sensitive` flag: the reported AUC is
+fold-assignment noise to that degree and the sufficient set should be read as one of
+several equivalent choices. On the 600-vehicle fixture the spread is 0.012 (0.859 / 0.858 / 0.847) and the flag trips: with that few vehicles, which ones land in which fold matters, and the verdict says so instead of reporting three decimals of AUC as if they were real.
+
 ---
 
 ## 8. Compute: what is trained, when, and on how much data
@@ -344,6 +370,15 @@ more vehicles would give. Flat means the capability is data-saturated on this fl
 remaining uncertainty is about value, not signal. On the 600-vehicle fixture the curve is
 0.798 -> 0.847 -> 0.853 -> 0.859 (still rising); the 5,000-vehicle fleet is where it flattens.
 
+**Is the fixed configuration leaving signal on the table?** `experiments.tuning_headroom`
+refits the sufficient set under a fixed grid of three alternative LightGBM configurations
+(more regularised; deeper; slower learning with more trees) and reports each AUC and the
+paired bootstrap delta against the default. The verdict always uses the default so studies
+stay comparable and none is tuned to its own noise; the headroom record says what that
+costs. Best-of-grid is chosen on the evaluation folds, so it is an optimistic bound;
+`loose_lower_bound` is set when even the interval's lower end clears 0.01 AUC. On the
+fixture nothing in the grid beats the default beyond noise.
+
 **No duplicate fits.** Fits are keyed by everything that determines their output (row
 identity, ordered signal set, model, fold count, seed, numeric environment) in a fit cache
 (`harness/fitcache.py`). A hit is bit-identical to a fresh fit. Measured on the fixture: a
@@ -358,7 +393,8 @@ line and the dashboard's Runtime panel show hits and misses per run.
 ## 9. What is still needed
 
 1. A run against Motorq's Snowflake through `SnowflakeSource` (the adapter and its contract
-   validation are ready; credentials are not).
+   validation are ready; credentials are not), with the label definitions in
+   [LABELS.md](LABELS.md) confirmed by the data owners first.
 2. Contracted unit prices (`price_sheet.yaml`) and product-owned value ranges.
 3. A pilot to validate predicted value against realised value (clears `value_unvalidated`).
 4. Deployment in Snowpark Container Services with Motorq's identity layer in front.

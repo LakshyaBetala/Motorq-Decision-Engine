@@ -8,7 +8,10 @@ const target = () => (process.env.MDE_API_URL ?? "http://127.0.0.1:8000").replac
 
 async function proxy(req: NextRequest, path: string[]) {
   const url = `${target()}/${path.join("/")}${req.nextUrl.search}`;
-  const init: RequestInit = { method: req.method, headers: { "content-type": req.headers.get("content-type") ?? "application/json" }, cache: "no-store" };
+  // MDE_API_KEY is read here, server-side, and never shipped to the browser
+  const headers: Record<string, string> = { "content-type": req.headers.get("content-type") ?? "application/json" };
+  if (process.env.MDE_API_KEY) headers.authorization = `Bearer ${process.env.MDE_API_KEY}`;
+  const init: RequestInit = { method: req.method, headers, cache: "no-store" };
   if (req.method !== "GET" && req.method !== "HEAD") init.body = await req.text();
   try {
     const r = await fetch(url, init);

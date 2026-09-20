@@ -244,17 +244,25 @@ def choose_operating_point(
 ) -> dict[str, Any]:
     """Pick the alert rate that maximises median net value. The operating point is an
     economic decision (alert cost vs. avoided cost), not a modelling default. Uses event-level
-    recall and false-alert rate when the harness provides them."""
+    recall and false-alert rate when the harness provides them, and the harness's own
+    cluster-bootstrap recall interval when it is present; `recall_ci_halfwidth` (a proxy
+    derived from the AUC interval) is only the fallback for rows without one."""
     rows = []
     for op in operating_points:
         r = op.get("event_recall")
         r = op["recall"] if r is None else r
         fa = op.get("false_alerts_per_100_vehicle_months")
-        rec = Range(
-            low=max(0.0, r - recall_ci_halfwidth),
-            base=r,
-            high=min(1.0, r + recall_ci_halfwidth),
-        )
+        ci = op.get("event_recall_ci") if op.get("event_recall") is not None else None
+        if ci:
+            rec = Range(low=max(0.0, min(ci["lo"], r)), base=r, high=min(1.0, max(ci["hi"], r)))
+            basis_ci = "bootstrap"
+        else:
+            rec = Range(
+                low=max(0.0, r - recall_ci_halfwidth),
+                base=r,
+                high=min(1.0, r + recall_ci_halfwidth),
+            )
+            basis_ci = "auc_proxy"
         t = _terms(
             value,
             event_rate,
@@ -273,6 +281,9 @@ def choose_operating_point(
                 "alert_rate": op["alert_rate"],
                 "recall": r,
                 "recall_basis": "event" if op.get("event_recall") is not None else "vehicle_day",
+                "recall_lo": rec.low,
+                "recall_hi": rec.high,
+                "recall_ci_basis": basis_ci,
                 "precision": op.get("precision"),
                 "median_lead_days": op.get("median_lead_days"),
                 "false_alerts_per_100_vehicle_months": fa,

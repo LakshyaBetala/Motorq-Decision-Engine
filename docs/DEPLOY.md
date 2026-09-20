@@ -48,6 +48,12 @@ the identity layer Motorq already runs:
 
 Keep the API on the private network; the dashboard proxies to it server-side (`MDE_API_URL`).
 
+Under that, set `MDE_API_KEY` on both containers. The API then rejects every request without
+`Authorization: Bearer <key>` (health excepted) and the dashboard's proxy adds the header from
+its own environment, so the key is never in a browser. This is the belt beneath the network
+control, not a substitute for it: anyone who can reach the dashboard through the identity layer
+can use the API through it. `MDE_CORS_ORIGINS` narrows which browser origins the API answers.
+
 ## 3. Inputs Motorq owns
 
 | File | Owner | Cadence |

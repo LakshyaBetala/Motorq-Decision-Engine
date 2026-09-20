@@ -6,7 +6,7 @@ import { api, Brief, Evidence, RunDetail } from "@/lib/api";
 import { DecisionBadge, decisionTone } from "@/components/Decision";
 import { AblationTrace, CrossOem, Importance, Tornado } from "@/components/Charts";
 import { AblationTable, CoverageHeatmap, OperatingCurve, WhatIf } from "@/components/Panels";
-import { DataQuality, LearningCurve, RedundancyGroups, RuntimeCompute } from "@/components/Evidence";
+import { DataQuality, LearningCurve, PolicyMargins, RedundancyGroups, RuntimeCompute, SeedStability, TuningHeadroom } from "@/components/Evidence";
 import { Cite, Drawer, SectionHead, Skeleton } from "@/components/Ui";
 
 const STAGES = ["DEFINE", "FEASIBILITY", "EXPERIMENT", "ECONOMICS", "DELIVERY", "POLICY", "REPORT"];
@@ -119,6 +119,9 @@ export default function RunPage() {
       lc: byName("learning_curve"),
       rt: byName("runtime"),
       comp: byName("compute"),
+      th: byName("tuning_headroom"),
+      ss: byName("seed_stability"),
+      ps: byName("policy_sensitivity"),
     };
   }, [evidence]);
 
@@ -241,6 +244,8 @@ export default function RunPage() {
               {byTool.lc && <div className="panel p-4"><h3 className="mb-1 text-sm font-medium">Learning curve <span className="font-normal text-ink-500">was this much data needed</span><Cite ids={[byTool.lc.evidence_id]} onOpen={setOpen} /></h3><LearningCurve lc={byTool.lc.outputs} /></div>}
               {byTool.red && <div className="panel p-4"><h3 className="mb-1 text-sm font-medium">Signal redundancy <span className="font-normal text-ink-500">which signals say the same thing</span><Cite ids={[byTool.red.evidence_id]} onOpen={setOpen} /></h3><RedundancyGroups red={byTool.red.outputs} sufficient={suff} /></div>}
               {byTool.xo && <div className="panel p-4"><h3 className="mb-1 text-sm font-medium">Leave-one-OEM-out <span className="font-normal text-ink-500">AUC on the held-out OEM</span><Cite ids={[byTool.xo.evidence_id]} onOpen={setOpen} /></h3><CrossOem per_oem={byTool.xo.outputs.per_oem} mean={byTool.xo.outputs.mean_auc} /></div>}
+              {byTool.th && <div className="panel p-4"><h3 className="mb-1 text-sm font-medium">Tuning headroom <span className="font-normal text-ink-500">how loose is the lower bound</span><Cite ids={[byTool.th.evidence_id]} onOpen={setOpen} /></h3><TuningHeadroom th={byTool.th.outputs} /></div>}
+              {byTool.ss && <div className="panel p-4"><h3 className="mb-1 text-sm font-medium">Seed stability <span className="font-normal text-ink-500">would another split tell a different story</span><Cite ids={[byTool.ss.evidence_id]} onOpen={setOpen} /></h3><SeedStability ss={byTool.ss.outputs} /></div>}
               {byTool.op && byTool.cmp && chosen && (
                 <div className="panel p-4">
                   <h3 className="mb-1 text-sm font-medium">Operating point <span className="font-normal text-ink-500">events caught vs alert burden</span><Cite ids={[byTool.op.evidence_id]} onOpen={setOpen} /></h3>
@@ -249,6 +254,7 @@ export default function RunPage() {
                     Alert on the top <span className="num">{(chosen.alert_rate * 100).toFixed(2)}%</span> of vehicle-days: <span className="num">{(chosen.recall * 100).toFixed(0)}%</span> of events caught
                     {chosen.median_lead_days != null && <>, median lead <span className="num">{chosen.median_lead_days.toFixed(1)}</span> d</>}
                     {chosen.false_alerts_per_100_vehicle_months != null && <>, <span className="num">{chosen.false_alerts_per_100_vehicle_months.toFixed(1)}</span> false alerts per 100 vehicle-months</>}.
+                    {chosen.recall_lo != null && <> Recall interval <span className="num">{(chosen.recall_lo * 100).toFixed(0)}–{(chosen.recall_hi * 100).toFixed(0)}%</span> ({chosen.recall_ci_basis === "bootstrap" ? "vehicle-cluster bootstrap of event recall" : "proxy from the AUC interval"}); this interval feeds the ROI distribution.</>}
                   </p>
                 </div>
               )}
@@ -319,6 +325,12 @@ export default function RunPage() {
                 <Ledger kind="flag" items={v.flags.map((f) => ({ ...f, ok: !f.tripped }))} onOpen={setOpen} />
               </div>
             </div>
+            {byTool.ps && (
+              <div className="panel max-w-2xl p-4">
+                <h3 className="mb-1 text-sm font-medium">How close is the verdict to a different one <Cite ids={[byTool.ps.evidence_id]} onOpen={setOpen} /></h3>
+                <PolicyMargins ps={byTool.ps.outputs} />
+              </div>
+            )}
             <p className={`text-sm ${tone.text}`}>
               {v.decision === "BUILD_READY" && "The evidence supports building. Whether to build is still a human call."}
               {v.decision === "PILOT" && "The evidence supports a pilot: every gate passes, and the flags say what a pilot must resolve."}

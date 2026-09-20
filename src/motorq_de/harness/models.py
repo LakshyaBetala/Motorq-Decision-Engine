@@ -30,6 +30,26 @@ LGBM_PARAMS = dict(
     force_row_wise=True,
 )
 
+# Alternative configurations for the tuning-headroom check. The verdict is always computed
+# on LGBM_PARAMS; these say how much a fixed grid would move the AUC. Names are model ids
+# ("lightgbm:regularised") so the fit cache keys them separately.
+LGBM_VARIANTS: dict[str, dict[str, Any]] = {
+    "regularised": dict(num_leaves=15, min_child_samples=200, reg_lambda=10.0),
+    "deep": dict(num_leaves=63, min_child_samples=20, n_estimators=300),
+    "slow": dict(learning_rate=0.02, n_estimators=500),
+}
+
+
+def lgbm_params(name: str) -> dict[str, Any]:
+    """Parameters for "lightgbm" or "lightgbm:<variant>"."""
+    base, _, variant = name.partition(":")
+    if base != "lightgbm":
+        raise ValueError(name)
+    params = dict(LGBM_PARAMS)
+    if variant:
+        params.update(LGBM_VARIANTS[variant])
+    return params
+
 
 def cpu_budget() -> int:
     """Cores this process may use: MDE_CPUS (set it to the container's CPU limit, since
@@ -52,8 +72,8 @@ def cv_parallelism(n_folds: int) -> tuple[int, int]:
 
 
 def make_model(name: str, seed: int, n_threads: int | None = None):
-    if name == "lightgbm":
-        params = dict(LGBM_PARAMS)
+    if name.startswith("lightgbm"):
+        params = lgbm_params(name)
         if n_threads is not None:
             params["n_jobs"] = n_threads
         return lgb.LGBMClassifier(random_state=seed, **params)
@@ -72,7 +92,7 @@ def fit_predict(
     name: str, seed: int, X_tr, y_tr, w_tr, X_te, n_threads: int | None = None
 ) -> np.ndarray:
     m = make_model(name, seed, n_threads)
-    if name == "lightgbm":
+    if name.startswith("lightgbm"):
         m.fit(X_tr, y_tr, sample_weight=w_tr)
     else:
         m.fit(X_tr, y_tr, clf__sample_weight=w_tr)

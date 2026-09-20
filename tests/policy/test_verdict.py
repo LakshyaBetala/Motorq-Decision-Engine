@@ -172,7 +172,7 @@ def test_thresholds_are_reported_on_results():
 def test_policy_thresholds_come_from_yaml():
     from motorq_de.policy.verdict import POLICY_VERSION
 
-    assert POLICY_VERSION == "1.3"
+    assert POLICY_VERSION == "1.4"
     assert THRESHOLDS["false_alerts_per_100_vehicle_months_max"] == 25.0
 
 
@@ -199,3 +199,65 @@ def test_cost_gate_only_exists_when_a_ceiling_is_requested():
     v = decide(tight, bundle())
     assert not next(g for g in v.gates if g.name == "cost").passed
     assert v.decision == "NOT_FEASIBLE"
+
+
+def test_seed_sensitive_flag():
+    ev = bundle()
+    ev.put("seed_stability", {"auc_spread": 0.012, "seed_sensitive": True}, "ev_ss")
+    v = decide(spec(validated=True), ev)
+    assert v.decision == "PILOT"
+    assert [f.name for f in v.flags if f.tripped] == ["seed_sensitive"]
+    ev.put("seed_stability", {"auc_spread": 0.002, "seed_sensitive": False}, "ev_ss")
+    assert decide(spec(validated=True), ev).decision == "BUILD_READY"
+
+
+def test_sensitivity_reports_margins_and_robustness():
+    from motorq_de.policy.verdict import sensitivity
+
+    s = sensitivity(spec(validated=True), bundle())
+    assert s["decision"] == "BUILD_READY"
+    gates = {g["name"]: g for g in s["gates"]}
+    # coverage 0.8 vs 0.6 in steps of 0.05 -> 4 steps clear
+    assert gates["data"]["margin_steps"] == 4.0
+    # AUC lift lower bound 0.15 vs 0 in steps of 0.01 -> 15 steps clear
+    assert gates["model"]["margin_steps"] == 15.0
+    assert s["binding_gate"] == "data"
+    assert s["robust"] is True
+    assert s["one_step_against"]["decision"] == "BUILD_READY"
+
+
+def test_sensitivity_detects_a_verdict_within_one_step():
+    from motorq_de.policy.verdict import sensitivity
+
+    # P(ROI>0) = 0.52 passes at 0.5 but fails once the threshold moves one 0.05 step
+    s = sensitivity(spec(validated=True), bundle(p_pos=0.52))
+    assert s["decision"] == "BUILD_READY"
+    assert s["binding_gate"] == "economics"
+    assert s["one_step_against"]["decision"] == "NOT_FEASIBLE"
+    assert "economics" in s["one_step_against"]["changed"]
+    assert s["robust"] is False
+    # and a tripped flag one step from clearing shows up on the favourable side
+    s2 = sensitivity(spec(validated=True), bundle(deg_upper=0.035))
+    assert s2["decision"] == "PILOT"
+    assert s2["one_step_in_favour"]["decision"] == "BUILD_READY"
+    assert s2["one_step_in_favour"]["changed"] == ["temporal_degradation"]
+
+
+def test_sensitivity_steps_cover_every_numeric_threshold():
+    from motorq_de.policy.verdict import FLAG_KEYS, GATE_KEYS, STEPS
+
+    for key, _ in {**GATE_KEYS, **FLAG_KEYS}.values():
+        assert key in STEPS, key
+
+
+def test_runner_feeds_the_policy_every_evidence_it_reads():
+    """Every `ev.get("<name>")` in the policy must be in the runner's POLICY_INPUTS, or the
+    flag silently never fires in a real study."""
+    import inspect
+    import re
+
+    from motorq_de.agent.runner import POLICY_INPUTS
+    from motorq_de.policy import verdict
+
+    read = set(re.findall(r'ev\.get\("([a-z_]+)"\)', inspect.getsource(verdict.decide)))
+    assert read <= set(POLICY_INPUTS), read - set(POLICY_INPUTS)

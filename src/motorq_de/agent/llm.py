@@ -46,6 +46,8 @@ def provider() -> str:
 
 
 def llm_available() -> bool:
+    if provider() in ("none", "off"):
+        return False
     if provider() == "gemini":
         return bool(os.environ.get("GEMINI_API_KEY"))
     try:
@@ -275,8 +277,12 @@ def _digest(ev: dict[str, Evidence], verdict: Verdict) -> str:
             "infra_change_pct",
             "marginal_change_pct",
         ],
+        "learning_curve": ["auc_gain_half_to_full", "still_improving"],
+        "tuning_headroom": ["best_variant", "headroom", "headroom_lo", "loose_lower_bound"],
+        "seed_stability": ["auc_spread", "seed_sensitive"],
         "operating_point": ["chosen"],
         "roi": ["p_roi_positive", "roi", "net_value_year"],
+        "policy_sensitivity": ["binding_gate", "robust", "one_step_against", "one_step_in_favour"],
         "tornado": ["dominant_input", "ranked"],
         "deployment": ["recommended_pattern", "note"],
     }

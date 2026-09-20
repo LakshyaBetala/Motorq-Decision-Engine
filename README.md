@@ -134,9 +134,13 @@ UNCERTAINTY FLAGS  any trip -> PILOT instead of BUILD_READY
   alert_burden            > 25 false-alert episodes per 100 vehicle-months at the chosen point
   data_still_improving    learning curve still rising (> 0.01 AUC from half to all vehicles):
                           the reported AUC is a lower bound
+  seed_sensitive          sufficient-set AUC moves by > 0.005 under a different fold assignment
 
 BUILD_READY only if every gate passes and no flag trips. Thresholds live in policy/policy.yaml
-(version 1.3); the brief stamps the version.
+(version 1.4); the brief stamps the version. Every verdict carries a sensitivity record: the
+margin of each gate and flag to its threshold in declared step units, the binding gate, and
+the decision with every threshold moved one step against the capability and one step in its
+favour.
 ```
 
 "BUILD_READY" means *the evidence supports building*. Whether to build is still a human call.
@@ -243,6 +247,7 @@ Change the value-bearing fraction in the what-if panel and the verdict recompute
 | 8 | Event-level metrics, cost-aware + cadence ablation, within-OEM benchmark, replay, what-if, portfolio + COGS report, policy/value config files, live progress, coverage heatmap, operating-point curve, Slack webhook, Bedrock switch, SQL templates, deployment guide | done, tested |
 | 10 | Fit cache (no duplicate fits; bit-identical hits; replay bypasses it), learning curve with the `data_still_improving` flag (policy 1.3); dashboard redesigned as an evidence ledger: numbered stage rail, sticky verdict strip, evidence drawer, data-contract and quality table, redundancy groups, learning curve, runtime; Geist type, skeleton/empty/error states | done, tested |
 | 9 | Canonical data contract (validated at every DEFINE, `mde data check`), COVESA VSS mapping of the signal registry, frozen-sensor and plausibility checks, runtime fingerprint with replay environment comparison, signal redundancy groups, cost-ceiling gate; [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) answers the methodology questions | done, tested |
+| 11 | Measured recall intervals (vehicle-cluster bootstrap of event recall feeds the ROI), tuning headroom (fixed LightGBM grid vs the default), seed stability with the `seed_sensitive` flag, policy sensitivity record (margins in step units, binding gate, one-step-against / one-step-in-favour decisions; policy 1.4), API key auth via the dashboard's server-side proxy, [docs/LABELS.md](docs/LABELS.md) label definitions for real data; fixed: the learning-curve flag was computed but never fed to the policy | done, tested |
 
 ```bash
 uv sync --extra dev --extra api --extra agent        # python 3.12

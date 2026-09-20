@@ -25,6 +25,8 @@ services:
       MDE_WEBHOOK_URL: ${MDE_WEBHOOK_URL:-}
       MDE_DASHBOARD_URL: ${MDE_DASHBOARD_URL:-http://localhost:3000}
       MDE_CPUS: ${MDE_CPUS:-4}
+      MDE_API_KEY: ${MDE_API_KEY:-}
+      MDE_CORS_ORIGINS: ${MDE_CORS_ORIGINS:-*}
     deploy:
       resources:
         limits: { cpus: "${MDE_CPUS:-4}" }
@@ -36,6 +38,7 @@ services:
     build: ./web
     environment:
       MDE_API_URL: http://api:8000
+      MDE_API_KEY: ${MDE_API_KEY:-}
     ports: ["3000:3000"]
     depends_on: [api]
 volumes:

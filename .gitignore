@@ -9,3 +9,4 @@ data/synthetic/
 node_modules/
 web/.next/
 dist/
+data/cache/

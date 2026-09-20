@@ -16,7 +16,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
-from motorq_de.harness.models import LGBM_PARAMS, cpu_budget, cv_parallelism
+from motorq_de.harness.models import LGBM_PARAMS, LGBM_VARIANTS, cpu_budget, cv_parallelism
 
 LIBRARIES = ("numpy", "pandas", "scipy", "scikit-learn", "lightgbm", "joblib")
 
@@ -50,7 +50,9 @@ def code_version() -> str:
 
 def fingerprint(n_folds: int = 5) -> dict[str, Any]:
     workers, threads = cv_parallelism(n_folds)
-    params = json.dumps(LGBM_PARAMS, sort_keys=True, default=str)
+    params = json.dumps(
+        {"base": LGBM_PARAMS, "variants": LGBM_VARIANTS}, sort_keys=True, default=str
+    )
     return {
         "python": platform.python_version(),
         "platform": f"{platform.system()}-{platform.machine()}",

@@ -11,25 +11,61 @@ GET  /runs/{run_id}/evidence    all evidence records
 GET  /runs/{run_id}/evidence/{evidence_id}
 POST /runs/{run_id}/ask         {question} -> cited answer (LLM)
 GET  /runs/{run_id}/messages
+
+Access: when MDE_API_KEY is set every route except /health requires
+`Authorization: Bearer <key>` (or `X-API-Key: <key>`); the dashboard's server-side proxy adds
+it, so the key never reaches a browser. Unset, the API is open, for local use only. Network
+placement (VPC, SPCS service, SSO in front of the dashboard) is the real control; this is the
+belt under it. MDE_CORS_ORIGINS is a comma-separated allow-list (default: any origin).
 """
 
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
+import os
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
 from motorq_de.agent.service import EXAMPLE_SPECS, Service
 from motorq_de.schemas import ProblemSpec
 
 app = FastAPI(title="Motorq Decision Engine", version="0.1.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in os.environ.get("MDE_CORS_ORIGINS", "*").split(",")],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 _service: Service | None = None
+
+OPEN_PATHS = {"/health", "/docs", "/openapi.json", "/redoc"}
+
+
+def api_key() -> str | None:
+    return os.environ.get("MDE_API_KEY") or None
+
+
+def presented_key(request: Request) -> str | None:
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return request.headers.get("x-api-key")
+
+
+@app.middleware("http")
+async def require_key(request: Request, call_next):
+    key = api_key()
+    if key and request.url.path not in OPEN_PATHS and request.method != "OPTIONS":
+        given = presented_key(request) or ""
+        if not hmac.compare_digest(given.encode(), key.encode()):
+            return JSONResponse({"detail": "missing or invalid API key"}, status_code=401)
+    return await call_next(request)
 
 
 def service() -> Service:
@@ -59,7 +95,12 @@ class WhatIfRequest(BaseModel):
 @app.get("/health")
 def health() -> dict[str, Any]:
     s = service()
-    return {"ok": True, "dataset_hash": s.source.dataset_hash, "llm_available": s.llm_available()}
+    return {
+        "ok": True,
+        "dataset_hash": s.source.dataset_hash,
+        "llm_available": s.llm_available(),
+        "auth_required": api_key() is not None,
+    }
 
 
 @app.get("/datasets")

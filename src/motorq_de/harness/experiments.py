@@ -9,6 +9,10 @@ temporal_validation   grouped CV vs. forward-in-time split with a horizon gap
 cross_oem_validation  leave-one-OEM-out
 model_comparison      named signal sets x {lightgbm, logistic} vs. baselines, with the
                       operating-point metrics the economics module consumes
+redundancy            Spearman clusters among candidates -> independent information groups
+learning_curve        AUC on nested vehicle subsets -> is more data still helping
+tuning_headroom       fixed LightGBM grid on the sufficient set -> how loose the lower bound is
+seed_stability        the sufficient-set AUC under different fold assignments
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from motorq_de.harness import stats
 from motorq_de.harness.fitcache import FitCache
 from motorq_de.harness.frames import FeatureStore, Matrix
 from motorq_de.harness.models import (
+    LGBM_VARIANTS,
     fit_predict,
     grouped_folds,
     make_model,
@@ -40,6 +45,8 @@ MIN_POS_FOR_OEM = 25
 ALERT_RATES = (0.0025, 0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.10, 0.15, 0.20)
 PERM_MAX_ROWS = 8_000  # rows per fold used for permutation importance
 ABLATION_SCREEN_K = 20
+TUNING_HEADROOM = 0.01  # best-of-grid AUC delta (lower CI bound) that marks a loose lower bound
+SEED_STABILITY_SEEDS = 3
 SINGLE_SIGNAL_CANDIDATES = 3  # signals kept after the importance screen before elimination
 
 
@@ -59,7 +66,9 @@ def _summary(M: Matrix) -> dict[str, Any]:
     }
 
 
-def _operating_metrics(y, s, w, M: Matrix | None = None, horizon_days: int = 7) -> dict[str, Any]:
+def _operating_metrics(
+    y, s, w, M: Matrix | None = None, horizon_days: int = 7, seed: int = 0
+) -> dict[str, Any]:
     r50 = stats.recall_at_precision(y, s, 0.5, w)
     r30 = stats.recall_at_precision(y, s, 0.3, w)
     points = []
@@ -73,11 +82,15 @@ def _operating_metrics(y, s, w, M: Matrix | None = None, horizon_days: int = 7) 
             ev = stats.event_level_metrics(
                 y, s, w, M.groups, M.dates, M.days_to_event, horizon_days, f
             )
+            rci = stats.event_recall_ci(
+                y, s, w, M.groups, M.dates, M.days_to_event, f, BOOT_B, seed
+            )
             p.update(
                 {
                     "event_recall": None
                     if not np.isfinite(ev["event_recall"])
                     else round(ev["event_recall"], 6),
+                    "event_recall_ci": None if not np.isfinite(rci.point) else rci.as_dict(),
                     "median_lead_days": None
                     if not np.isfinite(ev["median_lead_days"])
                     else round(ev["median_lead_days"], 3),
@@ -198,7 +211,7 @@ def feature_analysis(
         "n_splits": N_SPLITS,
         "auc": auc_ci.as_dict(),
         "auc_by_repeat": [round(a, 6) for a in repeat_aucs],
-        **_operating_metrics(M.y, oofs[0], M.w, M, spec.horizon_days),
+        **_operating_metrics(M.y, oofs[0], M.w, M, spec.horizon_days, seed),
         "ranking": ranking,
         "order_least_to_most_important": [r["signal"] for r in reversed(ranking)],
     }
@@ -631,7 +644,7 @@ def model_comparison(
             ci = stats.cluster_bootstrap_auc(M.y, oof, M.groups, M.w, BOOT_B, seed)
             entry["models"][model] = {
                 "auc": ci.as_dict(),
-                **_operating_metrics(M.y, oof, M.w, M, spec.horizon_days),
+                **_operating_metrics(M.y, oof, M.w, M, spec.horizon_days, seed),
             }
         # fair single-signal baseline: a one-signal model on the SAME population (univariate
         # AUC on available rows only would flatter signals with partial coverage)
@@ -672,3 +685,78 @@ def model_comparison(
         d = stats.paired_bootstrap_delta_auc(A.y, sb, sa, A.groups, A.w, BOOT_B, seed)
         paired = {"a": names[0], "b": names[1], "delta_auc_b_minus_a": d.as_dict()}
     return {**_summary(M_all), "sets": results, "paired": paired}
+
+
+def tuning_headroom(
+    store: FeatureStore,
+    spec: ProblemSpec,
+    signals: list[str],
+    variants: tuple[str, ...] = tuple(LGBM_VARIANTS),
+) -> dict[str, Any]:
+    """How much a fixed hyper-parameter grid moves the sufficient-set AUC.
+
+    The verdict is always computed on the one fixed configuration so studies stay
+    comparable and no study is tuned to its own noise. This records what that costs: every
+    variant's out-of-fold AUC and the paired delta of the best variant against the default.
+    The best-of-grid delta is selected on the same folds it is measured on, so it is an
+    optimistic (upper) bound on what tuning would gain; a delta whose lower CI bound is
+    above `headroom_threshold` means the reported AUC is a loose lower bound."""
+    seed = spec.seed
+    M = store.matrix(spec, signals)
+    base = store.oof("lightgbm", M, seed, N_SPLITS)
+    base_ci = stats.cluster_bootstrap_auc(M.y, base, M.groups, M.w, BOOT_B, seed)
+    rows: dict[str, dict[str, Any]] = {}
+    for v in variants:
+        name = f"lightgbm:{v}"
+        oof = store.oof(name, M, seed, N_SPLITS)
+        ci = stats.cluster_bootstrap_auc(M.y, oof, M.groups, M.w, BOOT_B, seed)
+        d = stats.paired_bootstrap_delta_auc(M.y, oof, base, M.groups, M.w, BOOT_B, seed)
+        rows[v] = {
+            "params": LGBM_VARIANTS[v],
+            "auc": ci.as_dict(),
+            "delta_vs_default": d.as_dict(),
+        }
+    best = max(rows, key=lambda v: rows[v]["delta_vs_default"]["point"]) if rows else None
+    delta = rows[best]["delta_vs_default"] if best else None
+    return {
+        **_summary(M),
+        "default_auc": base_ci.as_dict(),
+        "variants": rows,
+        "best_variant": best,
+        "headroom": None if delta is None else delta["point"],
+        "headroom_lo": None if delta is None else delta["lo"],
+        "headroom_threshold": TUNING_HEADROOM,
+        "loose_lower_bound": bool(delta is not None and delta["lo"] > TUNING_HEADROOM),
+        "note": "best-of-grid on the evaluation folds: an optimistic bound; the verdict "
+        "uses the default configuration",
+    }
+
+
+def seed_stability(
+    store: FeatureStore,
+    spec: ProblemSpec,
+    signals: list[str],
+    n_seeds: int = SEED_STABILITY_SEEDS,
+) -> dict[str, Any]:
+    """Determinism says the same seed gives the same answer; this asks whether a different
+    seed would give a materially different one. The sufficient-set AUC is recomputed under
+    `n_seeds` fold assignments (the model seed follows the fold seed). A spread wider than
+    the ablation tolerance means the reported AUC is fold-assignment noise to that degree
+    and the sufficient set should be read as one of several equivalent choices."""
+    seed = spec.seed
+    M = store.matrix(spec, signals)
+    per_seed = []
+    for i in range(n_seeds):
+        s = seed + 1000 * i
+        oof = store.oof("lightgbm", M, s, N_SPLITS)
+        per_seed.append({"seed": s, "auc": round(stats.fast_auc(M.y, oof, M.w), 6)})
+    aucs = [r["auc"] for r in per_seed]
+    spread = float(max(aucs) - min(aucs)) if aucs else float("nan")
+    return {
+        **_summary(M),
+        "per_seed": per_seed,
+        "auc_mean": round(float(np.mean(aucs)), 6),
+        "auc_spread": round(spread, 6),
+        "spread_threshold": ABLATION_TOLERANCE,
+        "seed_sensitive": bool(spread > ABLATION_TOLERANCE),
+    }
