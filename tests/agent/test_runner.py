@@ -128,6 +128,7 @@ def test_whatif_reuses_harness_evidence_and_recomputes_economics(source, brake_s
 def test_replay_is_identical(source, brake_spec, result):
     res, led = result
     rep = Runner(source, led).replay(res.run_id)
+    assert rep.diff["environment_identical"] is True
     assert rep.diff is not None and rep.diff["identical"] is True, [
         r for r in rep.diff["records"] if r["status"] != "identical"
     ]

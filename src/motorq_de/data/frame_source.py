@@ -22,6 +22,36 @@ from motorq_de.schemas import CoverageStat, DateWindow, ProblemSpec, QualityStat
 
 META_COLS = ("vehicle_id", "date", "oem", "model_year", "active")
 DECLARED_GAP_DAYS = {"realtime": 1.0, "daily": 1.0, "weekly": 7.0}
+
+# Physical plausibility by unit. A reading outside these bounds is a pipeline or sensor fault,
+# not a fleet condition. Units not listed (index, score, flag, band, ...) are not range-checked.
+PLAUSIBLE_RANGE: dict[str, tuple[float, float]] = {
+    "pct": (0.0, 100.0),
+    "ratio": (0.0, 1.0),
+    "kPa": (0.0, 1400.0),
+    "V": (0.0, 30.0),
+    "C": (-60.0, 150.0),
+    "mph": (0.0, 200.0),
+    "min": (0.0, 1440.0),
+    "hour": (0.0, 24.0),
+    "deg": (-180.0, 180.0),
+    "mi": (0.0, float("inf")),
+    "hr": (0.0, float("inf")),
+    "count": (0.0, float("inf")),
+    "gal": (0.0, float("inf")),
+    "mpg": (0.0, float("inf")),
+    "kg": (0.0, float("inf")),
+    "kWh": (0.0, float("inf")),
+    "mm": (0.0, float("inf")),
+    "g": (0.0, 3.0),
+    "nats": (0.0, float("inf")),
+}
+# Persistence test applies to continuous measurements that change with use; a count can
+# legitimately be zero for weeks and a flag can stay off.
+PERSISTENCE_UNITS = frozenset(
+    {"pct", "mi", "hr", "C", "kPa", "V", "gal", "mpg", "kg", "kWh", "mph", "min", "deg", "mm"}
+)
+FROZEN_RUN_DAYS = 14
 EMITS_MIN_VEHICLE_SHARE = (
     0.20  # an OEM "emits" a signal if >= 20% of its eligible vehicles ever report it
 )
@@ -119,9 +149,15 @@ class FrameSource(ABC):
             median_gap = float(gaps.median()) if len(gaps) else float("nan")
         else:
             median_gap = float("nan")
-        declared = DECLARED_GAP_DAYS[self.signal_metadata(signal_id).declared_frequency]
+        meta = self.signal_metadata(signal_id)
+        declared = DECLARED_GAP_DAYS[meta.declared_frequency]
         psi = _psi(present, signal_id) if len(present) > 200 else 0.0
         months = (df["date"].max() - df["date"].min()).days / 30.44 if len(df) else 0.0
+        frozen = (
+            _frozen_share(sub, signal_id, meta.unit)
+            if meta.unit in PERSISTENCE_UNITS and meta.declared_frequency != "weekly"
+            else 0.0
+        )
         return QualityStat(
             signal_id=signal_id,
             nonnull_rate=nonnull,
@@ -129,6 +165,8 @@ class FrameSource(ABC):
             declared_gap_days=declared,
             psi_first_last_quarter=psi,
             history_months=float(months),
+            frozen_share=frozen,
+            implausible_share=_implausible_share(present[signal_id], meta.unit),
         )
 
     def training_frame(self, spec: ProblemSpec, signals: list[str] | None = None) -> LabeledFrame:
@@ -183,6 +221,34 @@ def _infer_from_model_year(
         if m.sum() and cov[m].mean() >= MODEL_YEAR_COVERAGE:
             return int(y)
     return None
+
+
+def _frozen_share(sub: pd.DataFrame, col: str, unit: str, run_days: int = FROZEN_RUN_DAYS) -> float:
+    """Share of vehicles with a run of >= run_days consecutive calendar days on which the
+    value was present and identical - the classic stuck-sensor signature. A plateau at the
+    unit's physical bound (a battery charged to 100%, a dry spell at 0 mm) is a set-point,
+    not a fault, and is not counted."""
+    if len(sub) < run_days:
+        return 0.0
+    d = sub.sort_values(["vehicle_id", "date"])
+    g = d.groupby("vehicle_id", sort=False)
+    at_bound = pd.Series(False, index=d.index)
+    if unit in PLAUSIBLE_RANGE:
+        lo, hi = PLAUSIBLE_RANGE[unit]
+        at_bound = (d[col] == lo) | (d[col] == hi)
+    same = (d[col] == g[col].shift()) & (g["date"].diff() == pd.Timedelta(days=1)) & ~at_bound
+    run_id = (~same).cumsum()
+    run_len = same.groupby(run_id).transform("sum") + 1
+    longest = run_len.groupby(d["vehicle_id"]).max()
+    return float((longest >= run_days).mean()) if len(longest) else 0.0
+
+
+def _implausible_share(values: pd.Series, unit: str) -> float:
+    rng = PLAUSIBLE_RANGE.get(unit)
+    if rng is None or len(values) == 0:
+        return 0.0
+    v = values.astype(float)
+    return float(((v < rng[0]) | (v > rng[1])).mean())
 
 
 def _psi(present: pd.DataFrame, col: str, bins: int = 10) -> float:

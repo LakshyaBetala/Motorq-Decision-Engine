@@ -19,6 +19,17 @@ Names are configuration; shapes are what matters.
 A wide daily table is the natural product of a Snowflake dynamic table over the Snowpipe
 Streaming / managed Iceberg landing tables Motorq already runs.
 
+## 1a. The contract, checked before every study
+
+`mde data check` (with `MDE_SNOWFLAKE_CONFIG` set) validates the three tables against the
+canonical contract in `data/contract.py`: required columns and types, one row per vehicle /
+per event / per vehicle-day, referential integrity, no future dates, history length, grid
+completeness, and values on inactive days. Errors make the source unusable and every study
+re-runs the same validation at its DEFINE stage and fails closed; warnings appear in the
+brief's data section. Each catalogued signal's COVESA VSS path is in
+`world/registry.py::VSS`, which is the mapping to use when reconciling a Motorq signal name
+with an OEM's native one.
+
 ## 2. Config
 
 `snowflake.yaml`:

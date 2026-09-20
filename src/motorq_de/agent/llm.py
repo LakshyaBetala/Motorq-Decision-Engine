@@ -264,6 +264,7 @@ def _digest(ev: dict[str, Evidence], verdict: Verdict) -> str:
             "removed_in_order",
         ],
         "model_comparison": ["paired"],
+        "redundancy": ["n_pairs_redundant", "n_independent_groups", "clusters"],
         "temporal": ["cv_auc", "forward_auc", "degradation", "degradation_upper"],
         "cross_oem": ["mean_auc", "std_auc", "min_auc", "worst_oem"],
         "cross_oem_gap": ["oem", "missing_signals"],

@@ -22,6 +22,21 @@ sequential folds. Parallelism never changes a number - only wall time (pinned by
 `tests/harness/test_models.py`). Studies are serialised (one at a time per API process); run
 more replicas behind a queue if concurrency matters.
 
+## 1a. Keeping the data inside Motorq's boundary
+
+The engine only ever needs read access to three tables, so the deployment that keeps vehicle
+data inside is to run the API container **in Motorq's own Snowflake account on Snowpark
+Container Services**: build the image, push it to the account's image repository, create a
+compute pool (CPU is enough) and a service from `docker-compose.yml`'s API definition with the
+same environment. The container reads over the internal connection; Snowflake's IAM, private
+networking and secrets apply, and nothing egresses. The dashboard can run alongside it or on
+ECS behind the identity layer below. An ECS/EKS deployment inside Motorq's VPC with a private
+link to Snowflake is the equivalent alternative.
+
+Whatever the placement: VINs are hashed before the engine sees them, the ledger holds
+aggregates and statistics only, and with `MDE_LLM_PROVIDER=bedrock` the evidence digest the
+model reads stays inside AWS as well.
+
 ## 2. Access control
 
 Do not build auth into the app. Put the dashboard (and the API, if it must be reachable) behind

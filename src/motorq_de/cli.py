@@ -59,6 +59,35 @@ def world_inspect(dataset: Path | None = typer.Option(None, help="dataset dir; d
     rprint(ev.event_type.value_counts().to_dict())
 
 
+data_app = typer.Typer(help="Canonical data contract")
+app.add_typer(data_app, name="data")
+
+
+@data_app.command("check")
+def data_check(
+    as_json: bool = typer.Option(False, "--json"),
+    all_signals: bool = typer.Option(False, "--all", help="read every catalogued signal"),
+):
+    """Validate the active source (Snowflake if configured, else the dataset) against the
+    canonical contract: tables, keys, types, referential integrity, dates, grid completeness."""
+    from motorq_de.agent.service import Service
+    from motorq_de.data.contract import validate_source
+
+    src = Service().source
+    rep = validate_source(src, sample_signals=10_000 if all_signals else 16)
+    if as_json:
+        print(json.dumps(rep.as_dict(), indent=2))
+    else:
+        rprint(f"[bold]{'OK' if rep.ok else 'FAILED'}[/]  source={src.dataset_hash}")
+        for e in rep.errors:
+            rprint(f"  [red]error[/]    {e}")
+        for w in rep.warnings:
+            rprint(f"  [yellow]warning[/]  {w}")
+        for k, v in rep.stats.items():
+            rprint(f"  {k}: {v}")
+    raise typer.Exit(0 if rep.ok else 1)
+
+
 if __name__ == "__main__":
     app()
 

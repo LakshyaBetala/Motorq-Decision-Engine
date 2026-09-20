@@ -80,7 +80,11 @@ def bundle(
         "ev_ab",
     )
     ev.put("leakage", {"suspicious": list(suspicious)}, "ev_lk")
-    ev.put("cost_sufficient", {"placeholders": list(placeholders)}, "ev_cost")
+    ev.put(
+        "cost_sufficient",
+        {"placeholders": list(placeholders), "monthly": {"marginal_total": 1500.0}},
+        "ev_cost",
+    )
     return ev
 
 
@@ -161,7 +165,7 @@ def test_thresholds_are_reported_on_results():
 def test_policy_thresholds_come_from_yaml():
     from motorq_de.policy.verdict import POLICY_VERSION
 
-    assert POLICY_VERSION == "1.1"
+    assert POLICY_VERSION == "1.2"
     assert THRESHOLDS["false_alerts_per_100_vehicle_months_max"] == 25.0
 
 
@@ -173,3 +177,18 @@ def test_alert_burden_flag():
     assert [f.name for f in v.flags if f.tripped] == ["alert_burden"]
     ev.put("operating_point", {"chosen": {"false_alerts_per_100_vehicle_months": 5.0}}, "ev_op")
     assert decide(spec(validated=True), ev).decision == "BUILD_READY"
+
+
+def test_cost_gate_only_exists_when_a_ceiling_is_requested():
+    v = decide(spec(validated=True), bundle())
+    assert "cost" not in [g.name for g in v.gates]
+    over = spec(validated=True, constraints={"max_run_cost_usd_month": 2000.0})
+    v = decide(over, bundle())
+    gate = next(g for g in v.gates if g.name == "cost")
+    assert gate.passed and gate.value == 1500.0 and gate.threshold == 2000.0
+    assert gate.evidence_ids == ("ev_cost",)
+    assert v.decision == "BUILD_READY"
+    tight = spec(validated=True, constraints={"max_run_cost_usd_month": 1000.0})
+    v = decide(tight, bundle())
+    assert not next(g for g in v.gates if g.name == "cost").passed
+    assert v.decision == "NOT_FEASIBLE"

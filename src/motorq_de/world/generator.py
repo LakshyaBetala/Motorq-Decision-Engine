@@ -497,14 +497,16 @@ class WorldGenerator:
                 "soc_mean": np.where(ev, np.clip(soc_min + rng.uniform(10, 30, n), 0, 100), nan),
                 "dc_fast_charge_share": np.where(ev, dcfc_share_30d, nan),
                 "charge_cycles": np.where(ev, charge_cycles, nan),
-                "charge_energy_kwh": np.where(ev, miles * 0.32 + rng.normal(0, 2, n), nan),
+                "charge_energy_kwh": np.where(
+                    ev, np.maximum(miles * 0.32 + rng.normal(0, 2, n), 0), nan
+                ),
                 "battery_temp_max_c": np.where(ev, batt_temp, nan),
                 "battery_range_mi": np.where(
                     ev, veh.ev_range_mi * np.nan_to_num(soh, nan=1.0) + rng.normal(0, 15, n), nan
                 ),
                 "cabin_temp_max_c": np.where(ev, ambient_max + 8 + rng.normal(0, 3, n), nan),
                 "regen_energy_kwh": np.where(
-                    ev, miles * 0.06 * (0.5 + urban) + rng.normal(0, 0.5, n), nan
+                    ev, np.maximum(miles * 0.06 * (0.5 + urban) + rng.normal(0, 0.5, n), 0), nan
                 ),
                 "charge_events_count": np.where(
                     ev, rng.poisson(0.6 + dcfc_today, n).astype(float), nan

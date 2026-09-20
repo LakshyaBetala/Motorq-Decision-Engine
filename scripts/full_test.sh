@@ -9,13 +9,16 @@ echo "== format";      uv run ruff format --check src tests || exit 1
 echo "== layers";      uv run lint-imports || exit 1
 echo "== fast suite";  uv run pytest tests -q -m "not slow" -p no:warnings || exit 1
 
+# the oracle must run on data from the CURRENT generator: a 5,000-vehicle dataset whose
+# recorded generator_version matches world/params.yaml, else generate one
+GEN=$(uv run python -c "import yaml;print(yaml.safe_load(open('src/motorq_de/world/params.yaml'))['generator_version'])")
 DS=""
 for d in data/synthetic/*/; do
-  n=$(uv run python -c "import json;print(json.load(open('${d}params.json'))['population']['n_vehicles'])" 2>/dev/null)
-  [ "$n" = "5000" ] && DS="${d%/}"
+  m=$(uv run python -c "import json;p=json.load(open('${d}params.json'));print(p['population']['n_vehicles'], p.get('generator_version'))" 2>/dev/null)
+  [ "$m" = "5000 $GEN" ] && DS="${d%/}"
 done
 if [ -z "$DS" ]; then
-  echo "== generating default dataset"
+  echo "== generating default dataset (generator $GEN)"
   uv run mde world generate --profile default --seed 42 >/dev/null || exit 1
   DS=$(ls -td data/synthetic/*/ | head -1); DS="${DS%/}"
 fi

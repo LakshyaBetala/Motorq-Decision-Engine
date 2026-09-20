@@ -19,15 +19,18 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from motorq_de.data.contract import validate_source
 from motorq_de.data.source import DataSource
 from motorq_de.economics.cost import compare_costs, load_price_sheet, run_cost
 from motorq_de.economics.deployment import deployment_fit
 from motorq_de.economics.value import choose_operating_point, roi_distribution, tornado
+from motorq_de.harness import runtime
 from motorq_de.harness.experiments import (
     ablation,
     cross_oem_validation,
     feature_analysis,
     model_comparison,
+    redundancy,
     temporal_validation,
 )
 from motorq_de.harness.frames import FeatureStore
@@ -163,6 +166,32 @@ class Runner:
             lambda: json.loads(spec.model_dump_json()),
             ev,
         )
+        # the source must satisfy the canonical contract before anything is computed on it
+        contract = self._rec(
+            run_id,
+            "DEFINE",
+            "data_contract",
+            "data_contract",
+            {"dataset_hash": self.source.dataset_hash},
+            seed,
+            lambda: validate_source(self.source).as_dict(),
+            ev,
+        )
+        if not contract["ok"]:
+            raise RuntimeError(
+                "source violates the canonical data contract: " + "; ".join(contract["errors"])
+            )
+        fp = runtime.fingerprint()
+        self._rec(
+            run_id,
+            "DEFINE",
+            "runtime",
+            "runtime_fingerprint",
+            {"dataset_hash": self.source.dataset_hash},
+            seed,
+            lambda: fp,
+            ev,
+        )
         truth = getattr(self.source, "truth", lambda: {})()
         if truth:
             veh = self.source.vehicles()
@@ -279,6 +308,18 @@ class Runner:
             ev,
         )
         suff = ab["sufficient_set"]
+        # how the screened candidates relate to each other: redundancy groups explain why
+        # ablation could drop a signal without losing information
+        self._rec(
+            run_id,
+            "EXPERIMENT",
+            "redundancy",
+            "redundancy",
+            {"signals": ab["candidate_set"], "sufficient_set": suff},
+            seed,
+            lambda: redundancy(self.store, spec, ab["candidate_set"]),
+            ev,
+        )
         # cadence ablation: what does the capability lose if it only had daily/weekly signals?
         metas = self._metas()
         daily_only = [s for s in usable if metas[s].declared_frequency != "realtime"]
@@ -674,6 +715,17 @@ class Runner:
         res = self.run(spec, kind="replay", derived_from=parent_run_id)
         before = self.ledger.evidence_objects(parent_run_id)
         diff = diff_evidence(before, res.evidence)
+        if "runtime" in before and "runtime" in res.evidence:
+            same_env = runtime.same_numeric_environment(
+                before["runtime"].outputs, res.evidence["runtime"].outputs
+            )
+            diff["environment_identical"] = same_env
+            if not same_env:
+                diff["note"] = (
+                    "library or code versions differ from the original run; LightGBM does not "
+                    "guarantee identical arithmetic across versions, so numeric differences are "
+                    "expected and are not a determinism defect"
+                )
         res.diff = diff
         self.ledger.add_message(
             res.run_id, "system", json.dumps({"replay_diff": diff}, default=str), []

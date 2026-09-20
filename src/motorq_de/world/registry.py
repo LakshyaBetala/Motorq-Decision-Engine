@@ -43,7 +43,65 @@ class SignalDef:
             description=self.description,
             declared_frequency=self.frequency,
             powertrain=self.powertrain,
+            vss=VSS.get(self.signal_id),
         )
+
+
+# COVESA Vehicle Signal Specification (VSS) source signal for each daily aggregate. Paths were
+# verified against the spec sources (github.com/COVESA/vehicle_signal_specification, master,
+# 2026-09). A daily value is an aggregate (mean/max/min/delta/count) of the VSS signal; units
+# differ where noted (VSS uses m, km/h, seconds). Signals without a VSS counterpart (behaviour
+# event counts, DTC families, decoys, noise) are absent: they are Motorq-derived.
+VSS: dict[str, str] = {
+    "gps_lat_mean": "Vehicle.CurrentLocation.Latitude",
+    "gps_lon_mean": "Vehicle.CurrentLocation.Longitude",
+    "gps_fix_count": "Vehicle.CurrentLocation.Timestamp",
+    "trip_distance_mi": "Vehicle.TraveledDistance",  # daily delta; VSS unit m
+    "avg_speed_mph": "Vehicle.Speed",  # VSS unit km/h
+    "max_speed_mph": "Vehicle.Speed",
+    "altitude_mean_m": "Vehicle.CurrentLocation.Altitude",
+    "odometer_mi": "Vehicle.TraveledDistance",
+    "odometer_delta_mi": "Vehicle.TraveledDistance",
+    "brake_pad_wear_pct": "Vehicle.Chassis.Axle.Row1.Wheel.Left.Brake.PadWear",
+    "brake_pad_wear_rear_pct": "Vehicle.Chassis.Axle.Row2.Wheel.Left.Brake.PadWear",
+    "brake_fluid_level_low": "Vehicle.Chassis.Axle.Row1.Wheel.Left.Brake.IsFluidLevelLow",
+    "oil_life_pct": "Vehicle.Powertrain.CombustionEngine.EngineOil.LifeRemaining",  # VSS: s
+    "engine_hours": "Vehicle.Powertrain.CombustionEngine.EngineHours",
+    "engine_hours_delta": "Vehicle.Powertrain.CombustionEngine.EngineHours",
+    "coolant_temp_max_c": "Vehicle.Powertrain.CombustionEngine.EngineCoolant.Temperature",
+    "dtc_count_active": "Vehicle.Diagnostics.DTCCount",
+    "dtc_brake_family": "Vehicle.Diagnostics.DTCList",  # SAE J2012 family prefix
+    "dtc_powertrain_family": "Vehicle.Diagnostics.DTCList",
+    "dtc_battery_family": "Vehicle.Diagnostics.DTCList",
+    "dtc_emissions_family": "Vehicle.Diagnostics.DTCList",
+    "tire_pressure_fl_kpa": "Vehicle.Chassis.Axle.Row1.Wheel.Left.Tire.Pressure",
+    "tire_pressure_fr_kpa": "Vehicle.Chassis.Axle.Row1.Wheel.Right.Tire.Pressure",
+    "tire_pressure_rl_kpa": "Vehicle.Chassis.Axle.Row2.Wheel.Left.Tire.Pressure",
+    "tire_pressure_rr_kpa": "Vehicle.Chassis.Axle.Row2.Wheel.Right.Tire.Pressure",
+    "tire_pressure_min_kpa": "Vehicle.Chassis.Axle.Row1.Wheel.Left.Tire.Pressure",  # min of 4
+    "tpms_warning": "Vehicle.Chassis.Axle.Row1.Wheel.Left.Tire.IsPressureLow",  # any of 4
+    "washer_fluid_low": "Vehicle.Body.Windshield.Front.WasherFluid.IsLevelLow",
+    "battery_12v_voltage": "Vehicle.LowVoltageBattery.CurrentVoltage",
+    "seatbelt_unbuckled_events": "Vehicle.Cabin.Seat.Row1.DriverSide.IsBelted",
+    "fuel_level_pct": "Vehicle.Powertrain.FuelSystem.RelativeLevel",
+    "soc_min_daily": "Vehicle.Powertrain.TractionBattery.StateOfCharge.Current",
+    "soc_max_daily": "Vehicle.Powertrain.TractionBattery.StateOfCharge.Current",
+    "soc_mean": "Vehicle.Powertrain.TractionBattery.StateOfCharge.Current",
+    "charge_cycles": "Vehicle.Powertrain.TractionBattery.Charging.IsCharging",  # transitions
+    "charge_events_count": "Vehicle.Powertrain.TractionBattery.Charging.IsCharging",
+    "charge_energy_kwh": "Vehicle.Powertrain.TractionBattery.AccumulatedChargedEnergy",  # delta
+    "dc_fast_charge_share": "Vehicle.Powertrain.TractionBattery.Charging.ChargeCurrent.DC",
+    "battery_temp_max_c": "Vehicle.Powertrain.TractionBattery.Temperature.Max",
+    "battery_range_mi": "Vehicle.Powertrain.TractionBattery.Range",  # VSS unit m
+    "cabin_temp_max_c": "Vehicle.Cabin.HVAC.AmbientAirTemperature",
+    "ambient_temp_max_c": "Vehicle.Exterior.AirTemperature",
+    "ambient_temp_min_c": "Vehicle.Exterior.AirTemperature",
+    "precipitation_mm": "Vehicle.Exterior.PrecipitationIntensity",  # mm/h integrated
+    # the two leakage signals are VSS *service scheduling* state - known only once service is
+    # planned, which is exactly why the quality engine must drop them
+    "service_appointment_scheduled": "Vehicle.Service.IsServiceDue",
+    "service_interval_remaining_days": "Vehicle.Service.TimeToService",  # VSS unit s
+}
 
 
 B, T, V = "brake_service_event", "theft_event", "battery_degradation_event"

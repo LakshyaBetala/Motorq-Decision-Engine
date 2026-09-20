@@ -91,7 +91,8 @@ A deterministic pipeline with an optional LLM front end.
    |                     |   tornado sensitivity
    +---------+----------+
              v
-   +--------------------+   pure function of evidence: 4 hard gates + 9 uncertainty
+   +--------------------+   pure function of evidence: 4 hard gates (+ a cost gate when a
+   |                     |   ceiling is requested) + 9 uncertainty
    |  Decision policy    |   flags (policy.yaml, versioned) -> BUILD_READY / PILOT /
    |                     |   NOT_FEASIBLE
    +---------+----------+
@@ -160,7 +161,7 @@ The engine ships with a synthetic world and a production adapter, and it is impo
 
 **What synthetic proves:** the harness recovers planted structure and rejects decoys, leaks and noise; the policy behaves at its boundaries; the pipeline is byte-deterministic and replayable; the brief is fully cited. **What it does not prove:** anything about Motorq's actual signals.
 
-**The adapter is real.** `SnowflakeSource` reads Motorq-shaped tables (`VEHICLES`, `SIGNALS_DAILY`, `EVENTS`, `SIGNAL_CATALOG`; names and columns are YAML configuration) and shares every line of labelling, coverage, quality and modelling code with the synthetic source through a common `FrameSource` base. It infers OEM coverage from data, samples VINs deterministically, and completes the vehicle-day grid. It is tested end-to-end with a fake query function that serves the synthetic dataset in production shape — the adapter must reproduce the synthetic source's labels and coverage exactly. See [docs/SNOWFLAKE.md](docs/SNOWFLAKE.md).
+**The adapter is real.** `SnowflakeSource` reads Motorq-shaped tables (`VEHICLES`, `SIGNALS_DAILY`, `EVENTS`, `SIGNAL_CATALOG`; names and columns are YAML configuration) and shares every line of labelling, coverage, quality and modelling code with the synthetic source through a common `FrameSource` base. It infers OEM coverage from data, samples VINs deterministically, and completes the vehicle-day grid. It is tested end-to-end with a fake query function that serves the synthetic dataset in production shape — the adapter must reproduce the synthetic source's labels and coverage exactly. See [docs/SNOWFLAKE.md](docs/SNOWFLAKE.md); the end-to-end pipeline, the canonical contract and the in-account deployment are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ```bash
 mde run headless --example brake --snowflake snowflake.yaml --out brief.md
@@ -234,11 +235,13 @@ Change the value-bearing fraction in the what-if panel and the verdict recompute
 | 6 | `web/` — runs, gates/flags, charts, cited brief with evidence drill-down, Q&A | done |
 | 7 | `SnowflakeSource` — production adapter | done, tested against a production-shaped fake; live connection needs credentials |
 | 8 | Event-level metrics, cost-aware + cadence ablation, within-OEM benchmark, replay, what-if, portfolio + COGS report, policy/value config files, live progress, coverage heatmap, operating-point curve, Slack webhook, Bedrock switch, SQL templates, deployment guide | done, tested |
+| 9 | Canonical data contract (validated at every DEFINE, `mde data check`), COVESA VSS mapping of the signal registry, frozen-sensor and plausibility checks, runtime fingerprint with replay environment comparison, signal redundancy groups, cost-ceiling gate; [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) answers the methodology questions | done, tested |
 
 ```bash
 uv sync --extra dev --extra api --extra agent        # python 3.12
 uv run mde world generate --profile small             # ~7 s; `default` (5k vehicles, 18 months) ~2 min
 uv run mde run headless --example brake --out brief.md   # ~5 min small, ~25 min on 5k vehicles
+uv run mde data check                                 # canonical contract on the active source
 uv run mde run list
 uv run mde run evidence ev_<id>
 uv run mde run replay <run_id>                        # re-run and diff every evidence record

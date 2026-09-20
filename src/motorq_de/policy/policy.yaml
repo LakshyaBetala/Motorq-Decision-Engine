@@ -1,6 +1,7 @@
 # Decision policy thresholds. Versioned: bump `version` on any change; the brief stamps it.
+# 1.2: `cost` gate when a request states max_run_cost_usd_month (marginal run cost <= ceiling).
 # Owner: data-science lead. Review before each roadmap cycle.
-version: "1.1"
+version: "1.2"
 gates:
   model_lift_ci_lo: 0.0        # lower CI bound of AUC minus best one-signal model must exceed this
   p_roi_positive: 0.5          # P(ROI > 0) must reach this

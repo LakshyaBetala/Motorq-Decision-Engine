@@ -5,6 +5,8 @@
       model      lower CI bound of (AUC_model - AUC_best_baseline) > 0
       economics  P(ROI > 0) >= 0.5
       delivery   at least one deployment pattern meets the constraints
+      cost       (only when constraints.max_run_cost_usd_month is set) marginal monthly run cost
+                 of the sufficient set <= the ceiling
 
     UNCERTAINTY FLAGS  any trip -> PILOT instead of BUILD_READY
       cross_oem_variance      std of leave-one-OEM-out AUC > 0.03, or min < mean - 0.05
@@ -102,6 +104,22 @@ def decide(spec: ProblemSpec, ev: EvidenceBundle) -> Verdict:
             evidence_ids=roi_ids,
         )
     )
+
+    # cost ceiling: only a gate when the request states one; the marginal monthly run cost of
+    # the sufficient set must not exceed it
+    cost, cost_ids = ev.get("cost_sufficient")
+    marginal = ((cost or {}).get("monthly") or {}).get("marginal_total")
+    if c.max_run_cost_usd_month is not None:
+        gates.append(
+            GateResult(
+                name="cost",
+                passed=bool(marginal is not None and marginal <= c.max_run_cost_usd_month),
+                value=marginal,
+                threshold=c.max_run_cost_usd_month,
+                evidence_ids=cost_ids,
+                note="marginal monthly run cost of the sufficient set vs the requested ceiling",
+            )
+        )
 
     dep, dep_ids = ev.get("deployment")
     gates.append(

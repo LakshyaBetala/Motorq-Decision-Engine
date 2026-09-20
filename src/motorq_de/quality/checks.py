@@ -16,6 +16,8 @@ from motorq_de.schemas import ProblemSpec
 PSI_DRIFT_THRESHOLD = 0.20
 GAP_TOLERANCE = 1.5
 MIN_NONNULL = 0.05
+FROZEN_SHARE_MAX = 0.10  # share of vehicles with a >= 14-day identical run
+IMPLAUSIBLE_SHARE_MAX = 0.01  # share of readings outside the unit's physical range
 LEAK_AUC_HARD = 0.99
 LEAK_AUC_SUSPICIOUS = 0.95
 LEAK_AVAILABILITY_RATIO = 2.0
@@ -95,8 +97,14 @@ def _quality_row(sid: str, q, rows: dict, flags: dict) -> None:
             f.append("stale_vs_declared")
         if q.psi_first_last_quarter > PSI_DRIFT_THRESHOLD:
             f.append("drift")
+        if q.frozen_share > FROZEN_SHARE_MAX:
+            f.append("frozen")
+        if q.implausible_share > IMPLAUSIBLE_SHARE_MAX:
+            f.append("implausible")
         rows[sid] = {
             "nonnull_rate": round(q.nonnull_rate, 6),
+            "frozen_share": round(q.frozen_share, 6),
+            "implausible_share": round(q.implausible_share, 6),
             "median_gap_days": None
             if not np.isfinite(q.median_gap_days)
             else round(q.median_gap_days, 3),

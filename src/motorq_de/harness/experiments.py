@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+import pandas as pd
 from sklearn.feature_selection import mutual_info_classif
 
 from motorq_de.harness import stats
@@ -459,6 +460,64 @@ def cross_oem_validation(
         "std_auc": round(float(arr.std(ddof=1)), 6) if len(arr) > 1 else None,
         "min_auc": round(float(arr.min()), 6) if len(arr) else None,
         "worst_oem": worst,
+    }
+
+
+REDUNDANCY_RHO = 0.9
+REDUNDANCY_MAX_ROWS = 40_000
+
+
+def redundancy(
+    store: FeatureStore,
+    spec: ProblemSpec,
+    signals: list[str],
+    threshold: float = REDUNDANCY_RHO,
+) -> dict[str, Any]:
+    """How the signals relate to each other: Spearman rank correlation between the raw daily
+    values of every pair, on pairwise-complete rows. Pairs with |rho| >= threshold carry the
+    same information; ablation should keep at most one of each, and the brief says which.
+    Spearman (not Pearson) because telematics signals are skewed and unit-scaled arbitrarily;
+    rank correlation is invariant to monotone transforms."""
+    M = store.matrix(spec, signals)
+    rng = np.random.default_rng(spec.seed)
+    idx = np.arange(len(M.y))
+    if len(idx) > REDUNDANCY_MAX_ROWS:
+        idx = np.sort(rng.choice(idx, REDUNDANCY_MAX_ROWS, replace=False))
+    raw_cols = [M.feature_names.index(sid) for sid in M.signals]
+    df = pd.DataFrame(M.X[idx][:, raw_cols].astype(float), columns=list(M.signals))
+    rho = df.corr(method="spearman", min_periods=200)
+    pairs = []
+    sig = list(M.signals)
+    for i in range(len(sig)):
+        for j in range(i + 1, len(sig)):
+            r = rho.iat[i, j]
+            if np.isfinite(r) and abs(r) >= threshold:
+                pairs.append({"a": sig[i], "b": sig[j], "spearman": round(float(r), 4)})
+    pairs.sort(key=lambda p: -abs(p["spearman"]))
+    # connected components of the redundancy graph = groups that carry one piece of information
+    parent = {s: s for s in sig}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for p_ in pairs:
+        parent[find(p_["a"])] = find(p_["b"])
+    groups: dict[str, list[str]] = {}
+    for s_ in sig:
+        groups.setdefault(find(s_), []).append(s_)
+    clusters = sorted((sorted(g) for g in groups.values() if len(g) > 1), key=lambda g: -len(g))
+    return {
+        **_summary(M),
+        "method": "spearman",
+        "threshold": threshold,
+        "n_rows_used": int(len(idx)),
+        "n_pairs_redundant": len(pairs),
+        "pairs": pairs[:50],
+        "clusters": clusters,
+        "n_independent_groups": len(sig) - sum(len(g) - 1 for g in clusters),
     }
 
 

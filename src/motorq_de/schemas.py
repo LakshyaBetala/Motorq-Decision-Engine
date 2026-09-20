@@ -98,6 +98,9 @@ class SignalMeta(Frozen):
     description: str
     declared_frequency: Literal["realtime", "daily", "weekly"]
     powertrain: Literal["any", "ev", "ice"] = "any"
+    # COVESA Vehicle Signal Specification path of the source signal the daily value is derived
+    # from (None when the signal has no VSS counterpart, e.g. derived scores)
+    vss: str | None = None
 
 
 class CoverageStat(Frozen):
@@ -120,6 +123,11 @@ class QualityStat(Frozen):
     declared_gap_days: float
     psi_first_last_quarter: float
     history_months: float
+    # share of sampled vehicles whose value sat unchanged for >= FROZEN_RUN_DAYS consecutive
+    # active days (persistence test; only for continuous physical units)
+    frozen_share: float = 0.0
+    # share of non-null values outside the unit's physical range
+    implausible_share: float = 0.0
 
 
 class DateWindow(Frozen):

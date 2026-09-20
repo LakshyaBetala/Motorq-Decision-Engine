@@ -96,7 +96,8 @@ def build_brief(
                     + (f". Source: {spec.value.source_note}" if spec.value.source_note else ""),
                     I("spec"),
                 ),
-            ),
+            )
+            + _runtime_lines(E("runtime"), I("runtime")),
         )
     )
 
@@ -108,7 +109,24 @@ def build_brief(
         E("usable"),
         E("dataset_truth"),
     )
+    contract = E("data_contract")
     lines = []
+    if contract:
+        st = contract.get("stats", {})
+        dr = st.get("date_range") or ["?", "?"]
+        lines.append(
+            Line(
+                f"Canonical data contract: {'OK' if contract['ok'] else 'FAILED'}; {st.get('n_vehicles', 0):,} vehicles across {st.get('n_oems', 0)} OEMs, "
+                f"{st.get('n_days', 0)} days ({dr[0]} to {dr[1]}), vehicle-day grid {_fmt(st.get('grid_completeness'))} complete, "
+                f"{st.get('n_signals_catalogued', 0)} catalogued signals"
+                + (
+                    f"; warnings: {' | '.join(contract['warnings'])}"
+                    if contract["warnings"]
+                    else ""
+                ),
+                I("data_contract"),
+            )
+        )
     if truth:
         r = truth["achieved_rates"]
         lines.append(
@@ -229,6 +247,27 @@ def build_brief(
                 Line(
                     f"Ablation is underpowered: bootstrap resolution {ab['resolution']:.4f} AUC exceeds tolerance/2; removals near the boundary rest on point estimates",
                     I("ablation"),
+                )
+            )
+        red = E("redundancy")
+        if red:
+            suff_set = set(ab["sufficient_set"])
+            inside = [p_ for p_ in red["pairs"] if p_["a"] in suff_set and p_["b"] in suff_set]
+            cl = "; ".join(" ~ ".join(g) for g in red["clusters"][:6])
+            lines.append(
+                Line(
+                    f"Signal redundancy among the {red['n_signals']} screened candidates (Spearman |rho| >= {red['threshold']}): "
+                    f"{red['n_pairs_redundant']} redundant pairs, {red['n_independent_groups']} independent information groups"
+                    + (f"; groups: {cl}" if cl else "")
+                    + (
+                        "; within the sufficient set: "
+                        + ", ".join(
+                            f"{p_['a']} ~ {p_['b']} ({p_['spearman']:+.2f})" for p_ in inside[:5]
+                        )
+                        if inside
+                        else "; no redundant pair survives in the sufficient set"
+                    ),
+                    I("redundancy"),
                 )
             )
         if ab.get("kept_conservatively"):
@@ -465,6 +504,21 @@ def build_brief(
         sections=tuple(sections),
         generated_at=datetime.now(UTC).isoformat(),
         llm_used=llm_used,
+    )
+
+
+def _runtime_lines(rt: dict | None, ids: tuple[str, ...]) -> tuple[Line, ...]:
+    if not rt:
+        return ()
+    libs = rt.get("libraries", {})
+    return (
+        Line(
+            f"Runtime: python {rt.get('python')} on {rt.get('platform')}; lightgbm {libs.get('lightgbm')} "
+            f"(deterministic={rt.get('lgbm_deterministic')}, {rt.get('lgbm_histogram')} histograms), "
+            f"numpy {libs.get('numpy')}, scikit-learn {libs.get('scikit-learn')}; code {rt.get('code_version')}; "
+            f"{rt.get('fold_workers')} fold workers x {rt.get('lgbm_threads')} threads (thread count does not change results)",
+            ids,
+        ),
     )
 
 
