@@ -14,6 +14,7 @@ Two derived runs reuse a finished study's evidence:
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -49,6 +50,8 @@ from motorq_de.quality.checks import (
 from motorq_de.report.brief import Brief, Line, build_brief
 from motorq_de.report.render import to_json, to_markdown
 from motorq_de.schemas import Evidence, ProblemSpec, Range, ValueAssumptions, Verdict
+
+log = logging.getLogger(__name__)
 
 STAGES = ("DEFINE", "FEASIBILITY", "EXPERIMENT", "ECONOMICS", "DELIVERY", "POLICY", "REPORT")
 POLICY_INPUTS = (
@@ -682,10 +685,19 @@ class Runner:
         sid = self.ledger.start_step(run_id, "REPORT")
         brief = build_brief(spec, run_id, self.source.dataset_hash, ev, verdict, llm_used=llm_used)
         if narrative is not None:
-            brief = brief.model_copy(update={"narrative": tuple(narrative(ev, verdict))})
+            # the narrative is optional prose over a finished brief; a provider outage must
+            # not fail the study, so the brief ships headless and the step note says why
+            try:
+                brief = brief.model_copy(update={"narrative": tuple(narrative(ev, verdict))})
+            except Exception as exc:
+                log.warning("narrative skipped for %s: %s: %s", run_id, type(exc).__name__, exc)
+                brief = brief.model_copy(update={"llm_used": False})
+                self.ledger.end_step(sid, note=f"narrative skipped: {type(exc).__name__}: {exc}")
+                sid = None
         md = to_markdown(brief)
         self.ledger.finish_run(run_id, verdict, md, to_json(brief))
-        self.ledger.end_step(sid)
+        if sid is not None:
+            self.ledger.end_step(sid)
         return brief, md
 
     # ------------------------------------------------------------------ derived runs

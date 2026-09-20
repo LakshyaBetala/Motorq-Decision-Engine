@@ -4,7 +4,7 @@ import { useParams } from "next/navigation";
 import Link from "next/link";
 import { api, Brief, Evidence, RunDetail } from "@/lib/api";
 import { DecisionBadge, decisionTone } from "@/components/Decision";
-import { AblationTrace, CrossOem, Importance, Tornado } from "@/components/Charts";
+import { AblationTrace, CrossOem, CrossOemCaption, Importance, Tornado } from "@/components/Charts";
 import { AblationTable, CoverageHeatmap, OperatingCurve, WhatIf } from "@/components/Panels";
 import { DataQuality, LearningCurve, PolicyMargins, RedundancyGroups, RuntimeCompute, SeedStability, TuningHeadroom } from "@/components/Evidence";
 import { Cite, Drawer, SectionHead, Skeleton } from "@/components/Ui";
@@ -20,16 +20,27 @@ const STAGE_HINT: Record<string, string> = {
   REPORT: "the cited brief",
 };
 
-function Lines({ lines, onOpen }: { lines: { text: string; evidence_ids: string[] }[]; onOpen: (id: string) => void }) {
+function Lines({ lines, onOpen, show }: { lines: { text: string; evidence_ids: string[] }[]; onOpen: (id: string) => void; show?: number }) {
+  // long sections show their first lines and fold the rest; the export has every line
+  const [all, setAll] = useState(false);
+  const cut = show != null && !all && lines.length > show + 1;
+  const visible = cut ? lines.slice(0, show) : lines;
   return (
-    <ul className="max-w-[78ch] space-y-2 text-sm leading-relaxed text-ink-900">
-      {lines.map((l, i) => (
-        <li key={i} className="border-l-2 border-ink-200 pl-3">
-          {l.text}
-          <Cite ids={l.evidence_ids} onOpen={onOpen} />
-        </li>
-      ))}
-    </ul>
+    <div className="max-w-[78ch]">
+      <ul className="space-y-2 text-sm leading-relaxed text-ink-900">
+        {visible.map((l, i) => (
+          <li key={i} className="border-l-2 border-ink-200 pl-3">
+            {l.text}
+            <Cite ids={l.evidence_ids} onOpen={onOpen} />
+          </li>
+        ))}
+      </ul>
+      {cut && (
+        <button type="button" onClick={() => setAll(true)} className="mt-2 text-xs text-accent hover:underline">
+          Show all {lines.length} cited lines
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -230,7 +241,7 @@ export default function RunPage() {
                 <CoverageHeatmap cov={byTool.cov.outputs} />
               </div>
             )}
-            <Lines lines={sections["Data feasibility"]?.lines ?? []} onOpen={setOpen} />
+            <Lines lines={sections["Data feasibility"]?.lines ?? []} onOpen={setOpen} show={5} />
           </section>
         )}
 
@@ -243,7 +254,7 @@ export default function RunPage() {
               {byTool.ab && <div className="panel p-4"><h3 className="mb-1 text-sm font-medium">Ablation <span className="font-normal text-ink-500">AUC as signals are removed</span><Cite ids={[byTool.ab.evidence_id]} onOpen={setOpen} /></h3><AblationTrace trace={byTool.ab.outputs.trace} /><p className="mono mt-1 text-ink-700">sufficient set: {suff.join(", ")}{byTool.ab.outputs.underpowered ? " (underpowered)" : ""}</p></div>}
               {byTool.lc && <div className="panel p-4"><h3 className="mb-1 text-sm font-medium">Learning curve <span className="font-normal text-ink-500">was this much data needed</span><Cite ids={[byTool.lc.evidence_id]} onOpen={setOpen} /></h3><LearningCurve lc={byTool.lc.outputs} /></div>}
               {byTool.red && <div className="panel p-4"><h3 className="mb-1 text-sm font-medium">Signal redundancy <span className="font-normal text-ink-500">which signals say the same thing</span><Cite ids={[byTool.red.evidence_id]} onOpen={setOpen} /></h3><RedundancyGroups red={byTool.red.outputs} sufficient={suff} /></div>}
-              {byTool.xo && <div className="panel p-4"><h3 className="mb-1 text-sm font-medium">Leave-one-OEM-out <span className="font-normal text-ink-500">AUC on the held-out OEM</span><Cite ids={[byTool.xo.evidence_id]} onOpen={setOpen} /></h3><CrossOem per_oem={byTool.xo.outputs.per_oem} mean={byTool.xo.outputs.mean_auc} /></div>}
+              {byTool.xo && <div className="panel p-4"><h3 className="mb-1 text-sm font-medium">Leave-one-OEM-out <span className="font-normal text-ink-500">AUC on the held-out OEM</span><Cite ids={[byTool.xo.evidence_id]} onOpen={setOpen} /></h3><CrossOem per_oem={byTool.xo.outputs.per_oem} mean={byTool.xo.outputs.mean_auc} /><CrossOemCaption mean={byTool.xo.outputs.mean_auc} /></div>}
               {byTool.th && <div className="panel p-4"><h3 className="mb-1 text-sm font-medium">Tuning headroom <span className="font-normal text-ink-500">how loose is the lower bound</span><Cite ids={[byTool.th.evidence_id]} onOpen={setOpen} /></h3><TuningHeadroom th={byTool.th.outputs} /></div>}
               {byTool.ss && <div className="panel p-4"><h3 className="mb-1 text-sm font-medium">Seed stability <span className="font-normal text-ink-500">would another split tell a different story</span><Cite ids={[byTool.ss.evidence_id]} onOpen={setOpen} /></h3><SeedStability ss={byTool.ss.outputs} /></div>}
               {byTool.op && byTool.cmp && chosen && (
@@ -271,8 +282,8 @@ export default function RunPage() {
                 )}
               </div>
             )}
-            <Lines lines={sections["Model"]?.lines ?? []} onOpen={setOpen} />
-            <Lines lines={sections["Robustness"]?.lines ?? []} onOpen={setOpen} />
+            <Lines lines={sections["Model"]?.lines ?? []} onOpen={setOpen} show={4} />
+            <Lines lines={sections["Robustness"]?.lines ?? []} onOpen={setOpen} show={4} />
           </section>
         )}
 
@@ -292,7 +303,7 @@ export default function RunPage() {
                 )}
               </div>
             )}
-            <Lines lines={sections["Economics"]?.lines ?? []} onOpen={setOpen} />
+            <Lines lines={sections["Economics"]?.lines ?? []} onOpen={setOpen} show={5} />
             {run.status === "done" && (run.spec as any).value && (
               <div className="panel max-w-2xl p-4">
                 <h3 className="text-sm font-medium">Change the value assumptions</h3>

@@ -161,26 +161,24 @@ export function RuntimeCompute({ rt, comp }: { rt: any; comp: any }) {
 export function TuningHeadroom({ th }: { th: any }) {
   const rows = Object.entries(th.variants ?? {}) as [string, any][];
   if (!rows.length) return <p className="text-xs text-ink-500">No grid was run.</p>;
-  const fmt = (x: number) => `${x >= 0 ? "+" : ""}${x.toFixed(3)}`;
+  const fmt = (x: number) => `${x >= 0 ? "+" : ""}${x.toFixed(4)}`;
   return (
     <div className="text-sm">
-      <table className="w-full text-[12px]">
+      <table className="w-full whitespace-nowrap text-[12px]">
         <thead className="text-left text-ink-500">
-          <tr><th className="font-medium">configuration</th><th className="text-right font-medium">AUC</th><th className="text-right font-medium">vs default</th><th className="text-right font-medium">95% CI</th></tr>
+          <tr><th className="font-medium">configuration</th><th className="text-right font-medium">AUC</th><th className="text-right font-medium">vs default [95% CI]</th></tr>
         </thead>
         <tbody>
           <tr className="border-t border-ink-300/50">
-            <td className="mono">default <span className="text-ink-500">(used for the verdict)</span></td>
-            <td className="num text-right">{th.default_auc.point.toFixed(3)}</td>
-            <td className="num text-right text-ink-400">—</td>
-            <td className="num text-right text-ink-400">—</td>
+            <td className="mono py-1">default <span className="text-ink-500">(verdict)</span></td>
+            <td className="num text-right">{th.default_auc.point.toFixed(4)}</td>
+            <td className="num text-right text-ink-400">reference</td>
           </tr>
           {rows.map(([name, r]) => (
             <tr key={name} className={`border-t border-ink-300/50 ${name === th.best_variant ? "text-ink-950" : "text-ink-700"}`}>
-              <td className="mono">{name}{name === th.best_variant && <span className="ml-1 text-ink-500">best</span>}</td>
-              <td className="num text-right">{r.auc.point.toFixed(3)}</td>
-              <td className="num text-right">{fmt(r.delta_vs_default.point)}</td>
-              <td className="num text-right text-ink-500">{fmt(r.delta_vs_default.lo)} to {fmt(r.delta_vs_default.hi)}</td>
+              <td className="mono py-1">{name}{name === th.best_variant && <span className="ml-1 text-ink-500">best</span>}</td>
+              <td className="num text-right">{r.auc.point.toFixed(4)}</td>
+              <td className="num text-right">{fmt(r.delta_vs_default.point)} <span className="text-ink-500">[{fmt(r.delta_vs_default.lo)}, {fmt(r.delta_vs_default.hi)}]</span></td>
             </tr>
           ))}
         </tbody>
@@ -215,8 +213,18 @@ export function SeedStability({ ss }: { ss: any }) {
         ))}
       </div>
       <div className="num flex justify-between text-[11px] text-ink-500"><span>{a0.toFixed(3)}</span><span>{a1.toFixed(3)}</span></div>
+      <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-[12px]">
+        {rows.map((r) => (
+          <div key={r.seed} className="contents">
+            <dt className="mono text-ink-500">fold seed {r.seed}</dt>
+            <dd className="num text-ink-900">{r.auc.toFixed(4)}</dd>
+          </div>
+        ))}
+        <dt className="text-ink-500">spread</dt>
+        <dd className={`num font-medium ${ss.seed_sensitive ? "text-verdict-pilot" : "text-ink-950"}`}>{ss.auc_spread.toFixed(4)} <span className="font-normal text-ink-500">vs tolerance {ss.spread_threshold}</span></dd>
+      </dl>
       <p className="mt-2 text-xs text-ink-500">
-        Sufficient-set AUC under {rows.length} fold assignments: {aucs.map((a) => a.toFixed(4)).join(", ")}; spread <span className="num">{ss.auc_spread.toFixed(4)}</span> against a tolerance of {ss.spread_threshold} (the shaded band).{" "}
+        The shaded band is the tolerance around the mean.{" "}
         {ss.seed_sensitive
           ? "Wider than the ablation tolerance: read the sufficient set as one of several equivalent choices."
           : "The answer does not depend on how the vehicles were split."}

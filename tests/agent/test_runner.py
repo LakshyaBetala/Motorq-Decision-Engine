@@ -156,3 +156,25 @@ def test_event_level_operating_point_feeds_economics(result):
         roi_in["false_alerts_per_100_vehicle_months"] == ch["false_alerts_per_100_vehicle_months"]
     )
     assert "ablation_daily_cadence" in res.evidence and "cost_daily_cadence" in res.evidence
+
+
+def test_narrative_failure_does_not_fail_the_study(source, brake_spec, result):
+    """A language-model outage while writing the optional narrative ships the brief headless
+    and finishes the run; the REPORT step note says why."""
+    res, _ = result
+    led = _ledger()
+    run_id = "narrative0503"
+    led.create_run(run_id, brake_spec, source.dataset_hash, True, "predict brakes")
+
+    def outage(ev, verdict):
+        raise RuntimeError("HTTP Error 503: Service Unavailable")
+
+    brief, md = Runner(source, led)._report(
+        run_id, brake_spec, res.evidence, res.verdict, True, outage
+    )
+    assert brief.narrative == () and brief.llm_used is False
+    assert "headless" in md
+    run = led.get_run(run_id)
+    assert run["status"] == "done" and run["error"] is None
+    report = next(s for s in run["steps"] if s["name"] == "REPORT")
+    assert report["status"] == "done" and "narrative skipped" in (report["note"] or "")
