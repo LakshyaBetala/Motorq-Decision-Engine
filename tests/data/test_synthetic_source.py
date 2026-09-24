@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from motorq_de.data.source import DataSource
@@ -22,7 +23,7 @@ def test_labels_match_events_exactly(source, brake_spec: ProblemSpec):
         window = df[
             (df.vehicle_id == row.vehicle_id)
             & (df.date < row.date)
-            & (df.date >= row.date - pd.Timedelta(days=brake_spec.horizon_days))
+            & (df.date >= row.date - np.timedelta64(brake_spec.horizon_days, "D"))
         ]
         assert (window.y == 1).all(), (row.vehicle_id, row.date)
         # and the event day itself is not labelled by its own event (exact match excluded)
@@ -31,7 +32,7 @@ def test_labels_match_events_exactly(source, brake_spec: ProblemSpec):
             nxt = ev[
                 (ev.vehicle_id == row.vehicle_id)
                 & (ev.date > row.date)
-                & (ev.date <= row.date + pd.Timedelta(days=brake_spec.horizon_days))
+                & (ev.date <= row.date + np.timedelta64(brake_spec.horizon_days, "D"))
             ]
             assert int(same.y.iloc[0]) == int(len(nxt) > 0)
 
@@ -39,7 +40,7 @@ def test_labels_match_events_exactly(source, brake_spec: ProblemSpec):
 def test_last_horizon_days_marked_unknowable(source, brake_spec):
     lf = source.training_frame(brake_spec, ["odometer_delta_mi"])
     full = source.date_range()
-    cutoff = pd.Timestamp(full.end) - pd.Timedelta(days=brake_spec.horizon_days)
+    cutoff = pd.Timestamp(full.end) - np.timedelta64(brake_spec.horizon_days, "D")
     tail = lf.frame[lf.frame.date > cutoff]
     assert (tail.y == -1).all()
     head = lf.frame[lf.frame.date <= cutoff]

@@ -71,7 +71,7 @@ def test_event_recall_ci_brackets_the_point_and_is_deterministic():
             y = 1 if 0 < dt <= 7 else 0
             rows.append((v, d, y, float(dt) if dt > 0 else np.nan))
     v = np.array([r[0] for r in rows])
-    dates = np.array([np.datetime64("2025-01-01") + r[1] for r in rows])
+    dates = np.array([np.datetime64("2025-01-01") + np.timedelta64(r[1], "D") for r in rows])
     y = np.array([r[2] for r in rows])
     days_to = np.array([r[3] for r in rows])
     s = np.where((y == 1) & (v < 30), 0.9, 0.1).astype(float)

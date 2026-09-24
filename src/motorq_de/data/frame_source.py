@@ -196,7 +196,7 @@ class FrameSource(ABC):
         days_to = (merged["next_event"] - merged["date"]).dt.days
         df["y"] = ((days_to > 0) & (days_to <= spec.horizon_days)).astype(np.int8).to_numpy()
         present = [c for c in sig_cols if c in df.columns]
-        last = df["date"].max() - pd.Timedelta(days=spec.horizon_days)
+        last = df["date"].max() - np.timedelta64(int(spec.horizon_days), "D")
         unknowable = (df["date"] > last) | ~df["active"].astype(bool)
         df.loc[unknowable, "y"] = -1
         df = df.sort_values(["vehicle_id", "date"]).reset_index(drop=True)
@@ -236,7 +236,7 @@ def _frozen_share(sub: pd.DataFrame, col: str, unit: str, run_days: int = FROZEN
     if unit in PLAUSIBLE_RANGE:
         lo, hi = PLAUSIBLE_RANGE[unit]
         at_bound = (d[col] == lo) | (d[col] == hi)
-    same = (d[col] == g[col].shift()) & (g["date"].diff() == pd.Timedelta(days=1)) & ~at_bound
+    same = (d[col] == g[col].shift()) & (g["date"].diff() == np.timedelta64(1, "D")) & ~at_bound
     run_id = (~same).cumsum()
     run_len = same.groupby(run_id).transform("sum") + 1
     longest = run_len.groupby(d["vehicle_id"]).max()

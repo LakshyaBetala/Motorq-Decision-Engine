@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from motorq_de.data.contract import validate, validate_source
@@ -54,7 +55,7 @@ def test_duplicate_grain_orphans_and_future_dates_are_errors():
     veh, ev, sig = _frames()
     dup = pd.concat([sig, sig.iloc[:1]])
     orphan_ev = pd.concat([ev, ev.assign(vehicle_id="zzz")])
-    future_ev = ev.assign(date=[TODAY + pd.Timedelta(days=3)])
+    future_ev = ev.assign(date=[TODAY + np.timedelta64(3, "D")])
     rep = validate(veh, pd.concat([orphan_ev, future_ev]), dup, ["s1"], today=TODAY)
     msgs = " | ".join(rep.errors)
     assert "duplicate (vehicle_id, date)" in msgs
