@@ -368,7 +368,7 @@ def temporal_validation(
 ) -> dict[str, Any]:
     seed = spec.seed
     M = store.matrix(spec, signals)
-    oof = oof_predictions("lightgbm", M.X, M.y, M.w, M.groups, N_SPLITS, seed)
+    oof = store.oof("lightgbm", M, seed, N_SPLITS)  # same fit as model_comparison: a cache hit
     cv_auc = stats.cluster_bootstrap_auc(M.y, oof, M.groups, M.w, BOOT_B, seed)
     tr, te = temporal_split(M.dates, train_frac, spec.horizon_days)
     if M.y[te].sum() < 10 or M.y[tr].sum() < 10:
