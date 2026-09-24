@@ -8,6 +8,7 @@ import { AblationTrace, CrossOem, CrossOemCaption, Importance, Tornado } from "@
 import { AblationTable, CoverageHeatmap, OperatingCurve, WhatIf } from "@/components/Panels";
 import { DataQuality, LearningCurve, PolicyMargins, RedundancyGroups, RuntimeCompute, SeedStability, TuningHeadroom } from "@/components/Evidence";
 import { Cite, Drawer, SectionHead, Skeleton } from "@/components/Ui";
+import { FLAG_TEXT, GATE_TEXT } from "@/lib/labels";
 
 // The page reads top-down like the brief: verdict, one-paragraph summary, then each stage with a
 // one-line takeaway and its chart. Every cited line and every table is there, one click down.
@@ -23,27 +24,8 @@ const STAGE_LABEL: Record<string, [string, string]> = {
   REPORT: ["Evidence", "every number's source"],
 };
 
-// plain-language meaning of each gate and flag; the raw value and threshold sit beside it
-const GATE_TEXT: Record<string, string> = {
-  data: "Enough of the fleet emits every needed signal",
-  model: "The model beats the best single signal",
-  economics: "A positive return is more likely than not",
-  cost: "Run cost is under the requested ceiling",
-  delivery: "A delivery pattern fits the horizon",
-};
-const FLAG_TEXT: Record<string, string> = {
-  cross_oem_variance: "Performance differs across OEMs",
-  temporal_degradation: "Performance decays over time",
-  roi_spans_negative: "The return could be negative in a plausible case",
-  value_unvalidated: "Value assumptions have not been validated by a pilot",
-  short_history: "A needed signal has too little history",
-  ablation_underpowered: "A signal removal rests on a point estimate",
-  suspicious_signals: "A needed signal is unusually strong; confirm it exists before the event, not because of it",
-  cost_placeholders: "Run cost uses placeholder prices",
-  alert_burden: "Too many false alerts at the chosen operating point",
-  data_still_improving: "More data would still raise the accuracy",
-  seed_sensitive: "The result depends on how vehicles were split",
-};
+// flags whose "value" is a count of names already listed in the note
+const COUNT_FLAGS = new Set(["suspicious_signals", "cost_placeholders"]);
 
 const pct = (x: number | null | undefined, d = 0) => (x == null ? "—" : `${(x * 100).toFixed(d)}%`);
 const usd = (x: number | null | undefined) => (x == null ? "—" : `$${Math.round(x).toLocaleString()}`);
@@ -505,7 +487,7 @@ export default function RunPage() {
                     <li key={f.name} className="grid grid-cols-[10px_minmax(0,1fr)_auto] items-baseline gap-x-3 py-2 text-sm">
                       <span className="mt-[6px] inline-block h-2 w-2 rounded-full bg-verdict-pilot" />
                       <span className="min-w-0 text-ink-950">{FLAG_TEXT[f.name] ?? f.name}{f.note && f.name !== "value_unvalidated" && <span className="block text-xs text-ink-500">{f.note}</span>}<Cite ids={f.evidence_ids} onOpen={setOpen} /></span>
-                      <span className="num text-right text-ink-700">{f.value != null && f.threshold != null && f.threshold !== 0 ? <>{f3(f.value)}<span className="text-ink-400"> / {f3(f.threshold)}</span></> : ""}</span>
+                      <span className="num text-right text-ink-700">{f.value != null && f.threshold != null && !COUNT_FLAGS.has(f.name) ? <>{f3(f.value)}<span className="text-ink-400"> / {f3(f.threshold)}</span></> : ""}</span>
                     </li>
                   ))}
                 </ul>

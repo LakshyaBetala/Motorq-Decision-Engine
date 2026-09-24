@@ -8,6 +8,9 @@ export type RunSummary = {
   decision: string | null;
   created_at: string;
   dataset_hash: string;
+  kind: "study" | "whatif" | "replay";
+  derived_from: string | null;
+  horizon_days: number | null;
 };
 
 export type Gate = { name: string; passed: boolean; value: number | null; threshold: number | null; evidence_ids: string[]; note: string };

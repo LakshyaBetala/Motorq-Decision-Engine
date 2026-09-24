@@ -66,8 +66,8 @@ export default function RunsPage() {
                     <p className="truncate text-sm font-medium text-ink-950">{r.capability_name ?? "untitled"}</p>
                     <p className="mono mt-0.5 text-ink-500">
                       {r.target_event}
-                      {(r as any).horizon_days ? ` within ${(r as any).horizon_days} d` : ""}
-                      {KIND[(r as any).kind] ? ` (${KIND[(r as any).kind]})` : ""}
+                      {r.horizon_days ? ` within ${r.horizon_days} d` : ""}
+                      {KIND[r.kind] ? ` (${KIND[r.kind]})` : ""}
                     </p>
                   </div>
                   <p className="hidden self-center text-sm sm:block">

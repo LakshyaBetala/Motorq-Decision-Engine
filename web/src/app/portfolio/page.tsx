@@ -4,6 +4,7 @@ import Link from "next/link";
 import { api, Portfolio } from "@/lib/api";
 import { DecisionBadge } from "@/components/Decision";
 import { ApiError, Empty, Skeleton } from "@/components/Ui";
+import { FLAG_SHORT, GATE_SHORT } from "@/lib/labels";
 
 const usd = (x: number | null) => (x == null ? "—" : `$${Math.round(x).toLocaleString()}`);
 const CATEGORY: Record<string, string> = {
@@ -58,7 +59,7 @@ export default function PortfolioPage() {
                   <td className="num py-2.5 pr-3 text-right" title={r.sufficient_set.join(", ")}>{r.n_sufficient_signals}</td>
                   <td className="num py-2.5 pr-3 text-right">{usd(r.run_cost_marginal_month)}</td>
                   <td className="mono py-2.5 pr-3 text-ink-700">{r.dominant_input ?? "—"}</td>
-                  <td className="py-2.5 text-xs text-ink-700">{[...r.gates_failed.map((g) => `${g} gate`), ...r.flags_tripped.map((f) => f.replaceAll("_", " "))].join(", ") || "nothing"}</td>
+                  <td className="py-2.5 text-xs text-ink-700">{r.gates_failed.length > 0 && <span className="text-verdict-no">{r.gates_failed.map((g) => GATE_SHORT[g] ?? `${g} gate`).join(", ")}{r.flags_tripped.length ? "; " : ""}</span>}{r.flags_tripped.map((f) => FLAG_SHORT[f] ?? f.replaceAll("_", " ")).join(", ") || (r.gates_failed.length ? "" : "nothing")}</td>
                 </tr>
               ))}
             </tbody>
