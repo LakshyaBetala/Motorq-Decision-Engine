@@ -39,7 +39,7 @@ from motorq_de.harness.experiments import (
 )
 from motorq_de.harness.frames import FeatureStore
 from motorq_de.ledger.store import Ledger
-from motorq_de.policy.verdict import EvidenceBundle, decide, sensitivity
+from motorq_de.policy.verdict import THRESHOLDS, EvidenceBundle, decide, sensitivity
 from motorq_de.quality.checks import (
     coverage_report,
     event_rate,
@@ -52,6 +52,9 @@ from motorq_de.report.render import to_json, to_markdown
 from motorq_de.schemas import Evidence, ProblemSpec, Range, ValueAssumptions, Verdict
 
 log = logging.getLogger(__name__)
+
+# P(ROI > 0) this close to the economics gate counts as borderline and triggers a widened re-run
+ROI_BORDERLINE = 0.1
 
 STAGES = ("DEFINE", "FEASIBILITY", "EXPERIMENT", "ECONOMICS", "DELIVERY", "POLICY", "REPORT")
 POLICY_INPUTS = (
@@ -404,10 +407,14 @@ class Runner:
             ev,
         )
         # replan predicate: cross-OEM gap -> which required signals does the worst OEM lack?
+        # Same rule as the cross_oem_variance flag, read from policy.yaml so the two never drift.
         if (
             xo.get("worst_oem")
             and xo.get("std_auc") is not None
-            and (xo["std_auc"] > 0.03 or (xo["mean_auc"] - xo["min_auc"]) > 0.05)
+            and (
+                xo["std_auc"] > THRESHOLDS["cross_oem_std"]
+                or (xo["mean_auc"] - xo["min_auc"]) > THRESHOLDS["cross_oem_min_gap"]
+            )
         ):
             replans.append("cross_oem_gap")
             worst = xo["worst_oem"]
@@ -603,8 +610,11 @@ class Runner:
             ),
             ev,
         )
-        # replan predicate: borderline economics -> widen value ranges and re-run ROI
-        if roi["p_roi_positive"] is not None and 0.4 <= roi["p_roi_positive"] <= 0.6:
+        # replan predicate: borderline economics (within ROI_BORDERLINE of the economics gate)
+        # -> widen value ranges and re-run ROI
+        gate = THRESHOLDS["p_roi_positive"]
+        p_pos = roi["p_roi_positive"]
+        if p_pos is not None and abs(p_pos - gate) <= ROI_BORDERLINE:
             replans.append("roi_borderline")
             v = spec.value
             wide = v.model_copy(
